@@ -10,6 +10,9 @@ prefix-copy.new.*
 isolation/
 isolation.new.*
 
+# Record of what the last launch actually was, kept outside every writable tree
+run-state/
+
 # Generated environment (absolute paths)
 env.sh
 test.sh

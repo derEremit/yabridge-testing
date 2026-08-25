@@ -798,6 +798,25 @@ HOOK
     "$ISOLATED_HOME/.clap/yabridge:$BATS_TEST_TMPDIR/native-a:$BATS_TEST_TMPDIR/native-b" ]
 }
 
+# The plugin paths handed to the DAW are the whole point of the isolation: a
+# production yabridge directory on VST_PATH would put production bridges back
+# in front of the DAW no matter what the sandbox mounts say.
+@test "a production yabridge directory can never reach VST_PATH" {
+  good_sync_hook
+  mkdir -p "$PRODUCTION_HOME/.vst/yabridge"
+  printf '%s\n' 'production bridge' \
+    > "$PRODUCTION_HOME/.vst/yabridge/Production.so"
+
+  run_daw_fixture --prefix "$SOURCE" \
+    --native-plugin-path "$PRODUCTION_HOME/.vst/yabridge" fake-daw
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"protected"* ]]
+  [ ! -e "$DAW_ENV_FILE" ]
+  [ ! -e "$ISOLATION" ]
+  [ "$(sync_call_count)" -eq 0 ]
+}
+
 @test "launcher rejects an option-looking native plugin path value" {
   run_daw_fixture --prefix "$SOURCE" --native-plugin-path --fresh fake-daw
 

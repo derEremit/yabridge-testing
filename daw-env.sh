@@ -28,11 +28,12 @@
 #     writable. The sandbox gets a fresh network namespace unless you pass
 #     --network. If Bubblewrap or the namespaces it needs are unavailable the
 #     launcher refuses to start the DAW.
-#   - Every run records what it actually is in isolation/run-manifest.json:
+#   - Every run records what it actually is in run-state/run-manifest.json:
 #     source and clone identity, Wine and yabridge versions, bridge roots, the
 #     DAW, the sandbox boundary and the Wine diagnostics state. The manifest is
 #     written after every check has passed and before the DAW starts. If it
-#     cannot be written, the DAW does not run.
+#     cannot be written, the DAW does not run. It is kept outside every
+#     writable tree, so the DAW it describes cannot rewrite its own record.
 #
 # The clone persists between runs (so the one-time wine upgrade isn't repeated
 # and plugin state survives). Use --fresh to re-clone, --clean to delete it.
@@ -53,9 +54,16 @@
 #   ./daw-env.sh --clean                   # delete prefix-copy/ + isolation/
 #
 # Plugin path options:
-#   --native-plugin-path DIR   expose an absolute native plugin directory to
-#                              the DAW in addition to the isolated bridges.
-#                              Repeatable. Nothing else is inherited.
+#   --native-plugin-path DIR   expose one existing, canonical, absolute native
+#                              plugin directory to the DAW in addition to the
+#                              isolated bridges. Repeatable. Nothing else is
+#                              inherited. Rejected when it is the filesystem
+#                              root, at or above your real home, at or above
+#                              anything the sandbox creates for itself, or
+#                              overlaps the production prefix, a production
+#                              plugin root, the project tree, the clone or the
+#                              isolation tree. A directory inside a read-only
+#                              system root, such as /usr/lib/vst3, is fine.
 #   --allow-empty              launch even when no bridges were generated.
 #                              Fixtures and diagnostics only.
 #
@@ -115,8 +123,64 @@ daw_env_cleanup() {
     local status=$?
     trap - EXIT INT TERM
     cleanup_owned_bridge_candidate
+    cleanup_owned_bridge_scan_listing
     release_clone_lock
     return "$status"
+}
+
+# env.sh is a generated file in the project tree, sourced long after this
+# command line has been parsed and every input validated. A copy left over from
+# an older setup — or one somebody edited — must not be able to reach back and
+# widen the boundary this invocation already settled, so each decision is
+# captured before the file is read and reasserted afterwards. Anything the file
+# tried to change is reported rather than silently reverted, because a
+# generated environment that disagrees about policy is worth knowing about.
+PROTECTED_POLICY_NAMES=(
+    HOME SANDBOX_NETWORK QUIET_WINE SANDBOX_BWRAP
+    SANDBOX_NAMESPACES_VERIFIED SANDBOX_UNSHARE_USER SANDBOX_DAW_PATH
+    SANDBOX_PROJECT_ROOT SANDBOX_REAL_PREFIX SANDBOX_CLONE SANDBOX_ISOLATION
+    RUN_STATE_DIR
+)
+declare -A PARSED_POLICY=()
+PARSED_WRITABLE_PATHS=()
+PARSED_NATIVE_PLUGIN_PATHS=()
+
+capture_parsed_security_policy() {
+    local name
+    for name in "${PROTECTED_POLICY_NAMES[@]}"; do
+        PARSED_POLICY["$name"]="${!name-}"
+    done
+    PARSED_WRITABLE_PATHS=(
+        ${SANDBOX_WRITABLE_PATHS[@]+"${SANDBOX_WRITABLE_PATHS[@]}"})
+    PARSED_NATIVE_PLUGIN_PATHS=(
+        ${SANDBOX_NATIVE_PLUGIN_PATHS[@]+"${SANDBOX_NATIVE_PLUGIN_PATHS[@]}"})
+}
+
+report_policy_override() {
+    echo "Warning: the generated environment $ROOT/env.sh changed $1;" \
+        "this run uses what the command line decided." >&2
+    echo "Regenerate it with ./setup.sh if this keeps happening." >&2
+}
+
+assert_parsed_security_policy() {
+    local name
+
+    for name in "${PROTECTED_POLICY_NAMES[@]}"; do
+        [[ "${!name-}" == "${PARSED_POLICY[$name]}" ]] && continue
+        report_policy_override "$name"
+        printf -v "$name" '%s' "${PARSED_POLICY[$name]}"
+    done
+    if [[ "${SANDBOX_WRITABLE_PATHS[*]-}" != "${PARSED_WRITABLE_PATHS[*]-}" ]]; then
+        report_policy_override "the approved writable paths"
+        SANDBOX_WRITABLE_PATHS=(
+            ${PARSED_WRITABLE_PATHS[@]+"${PARSED_WRITABLE_PATHS[@]}"})
+    fi
+    if [[ "${SANDBOX_NATIVE_PLUGIN_PATHS[*]-}" != \
+        "${PARSED_NATIVE_PLUGIN_PATHS[*]-}" ]]; then
+        report_policy_override "the native plugin paths"
+        SANDBOX_NATIVE_PLUGIN_PATHS=(
+            ${PARSED_NATIVE_PLUGIN_PATHS[@]+"${PARSED_NATIVE_PLUGIN_PATHS[@]}"})
+    fi
 }
 
 require_option_value() {
@@ -164,7 +228,6 @@ while [[ $# -gt 0 ]]; do
         *)  break ;;
     esac
 done
-export YABRIDGE_STAGING_REFRESH_BRIDGES="$REFRESH_BRIDGES"
 
 DAW="${1:-}"
 if [[ "$CLEAN" != true && -z "$DAW" ]]; then
@@ -203,6 +266,17 @@ SANDBOX_PROJECT_ROOT="$ROOT"
 SANDBOX_REAL_PREFIX="$REAL_PREFIX"
 SANDBOX_CLONE="$COPY"
 SANDBOX_ISOLATION="$ROOT/isolation"
+# The run manifest describes a run to whoever reads it afterwards, so it is
+# deliberately not kept in the isolation tree the sandbox makes writable. It
+# lives in its own generated directory directly under the project root, which
+# the sandbox binds read-only in full — the DAW this record describes can read
+# it and cannot change it.
+RUN_STATE_DIR="$ROOT/run-state"
+# Named here rather than just before the command is built, because what these
+# directories are decides whether the boundary can be enforced at all — and a
+# refusal has to come before the clone, the bridge sync and the plugin paths
+# handed to the DAW.
+SANDBOX_NATIVE_PLUGIN_PATHS=(${NATIVE_PLUGIN_PATHS[@]+"${NATIVE_PLUGIN_PATHS[@]}"})
 COMPONENT_STATE_FILE="$ROOT/build/component-state.env"
 if [[ "$CLEAN" != true ]]; then
     resolve_daw_executable "$DAW" || exit 1
@@ -265,7 +339,9 @@ fi
 # ── Build the environment ────────────────────────────────────────────────────
 # env.sh sets WINELOADER/WINESERVER/WINEDLLPATH/PATH/LD_LIBRARY_PATH (wine 11.8
 # + test yabridge) and also WINEPREFIX=prefix/ — we override that below.
+capture_parsed_security_policy
 source "$ROOT/env.sh"
+assert_parsed_security_policy
 export WINEPREFIX="$COPY"
 
 # ── Resolve the components this run will use and record ──────────────────────
@@ -305,7 +381,18 @@ for guard in "$HOME/.audio-production/winplugins" "$HOME/winplugins" "$HOME/.win
     fi
 done
 
-validate_clone_provenance "$COPY" "$REAL_PREFIX"
+# Re-proved now that the clone is the prefix this run will actually use. A
+# status of 2 means the directory is simply not there, which the earlier call
+# reads as "nothing has been cloned yet" — by this point it means the clone
+# vanished after it was made, and saying so beats exiting with a bare 2.
+if ! validate_clone_provenance "$COPY" "$REAL_PREFIX"; then
+    clone_status=$?
+    if [[ "$clone_status" -eq 2 ]]; then
+        echo "Error: the prefix clone disappeared after it was created: $COPY" >&2
+        echo "Something removed it while this launch was preparing." >&2
+    fi
+    exit 1
+fi
 
 # ── Generate bridges that can only reach the clone ────────────────────────────
 # clone_prefix_atomic clears its own traps on success, so the composed cleanup
@@ -335,15 +422,11 @@ ISOLATED_BRIDGES_ALLOW_EMPTY="$ALLOW_EMPTY"
 prepare_isolated_bridges "$ROOT" "$COPY" "$YABRIDGECTL" "$YABRIDGE_HOME"
 export_isolated_plugin_paths ${NATIVE_PLUGIN_PATHS[@]+"${NATIVE_PLUGIN_PATHS[@]}"}
 
-release_clone_lock
-trap - EXIT INT TERM
-
 # ── Build the sandbox command ────────────────────────────────────────────────
 # The command is an argv array, so every DAW argument reaches the DAW exactly
 # as it was given. The canonical executable from the preflight is passed rather
 # than the name, so sourcing env.sh cannot have changed which binary this is.
 SANDBOX_ISOLATED_HOME="$ISOLATED_BRIDGE_HOME"
-SANDBOX_NATIVE_PLUGIN_PATHS=(${NATIVE_PLUGIN_PATHS[@]+"${NATIVE_PLUGIN_PATHS[@]}"})
 build_bwrap_command LAUNCH_COMMAND "$SANDBOX_DAW_PATH" "$@" || exit 1
 
 # ── Record what this run actually is ─────────────────────────────────────────
@@ -373,7 +456,11 @@ else
     RUN_MANIFEST_WINEDEBUG_SET=false
     RUN_MANIFEST_WINEDEBUG=""
 fi
-RUN_MANIFEST_FILE="$SANDBOX_ISOLATION/$RUN_MANIFEST_NAME"
+RUN_MANIFEST_FILE="$RUN_STATE_DIR/$RUN_MANIFEST_NAME"
+if ! mkdir -p -- "$RUN_STATE_DIR"; then
+    echo "Error: could not create the run state directory: $RUN_STATE_DIR" >&2
+    exit 1
+fi
 write_run_manifest "$RUN_MANIFEST_FILE" LAUNCH_COMMAND || exit 1
 
 # ── Launch ───────────────────────────────────────────────────────────────────
@@ -399,5 +486,11 @@ echo "  writable:    $COPY, $SANDBOX_ISOLATION${SANDBOX_WRITABLE_PATHS[*]+, ${SA
 echo "  Production prefix and plugin roots are mounted read-only."
 echo "  Bridges resolve only inside the clone; production bridges are not used."
 echo ""
+
+# The clone lock is held through the manifest write and released here, one
+# statement before the process is replaced: everything that reads or proves the
+# clone has finished, and nothing between this line and exec can fail.
+release_clone_lock
+trap - EXIT INT TERM
 
 exec "${LAUNCH_COMMAND[@]}"

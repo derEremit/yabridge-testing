@@ -85,14 +85,26 @@ cleanup_stale_wine_candidates() (
     done
 )
 
+WINE_RELEASES_URL="https://github.com/Kron4ek/Wine-Builds/releases"
+WINE_DOWNLOAD_URL="$WINE_RELEASES_URL/download"
+
+# A Wine version names a release directory, a filename inside build/ and a URL
+# path segment. Anything outside this shape could write the downloaded archive
+# somewhere other than build/.
+WINE_VERSION_PATTERN='^[A-Za-z0-9][A-Za-z0-9._+-]*$'
+
 usage() {
     local status="${1:-1}"
-    echo "Usage: $0 [--wine-version VERSION] [--wine-sha256 SHA256] [--yabridge-branch BRANCH] [--no-wine] [--no-yabridge]"
-    echo "  --wine-version       Wine version to download (default: latest-staging)"
-    echo "  --wine-sha256        Expected SHA-256 for a requested Wine version"
+    echo "Usage: $0 --wine-version VERSION --wine-sha256 SHA256 [--yabridge-branch BRANCH] [--no-wine] [--no-yabridge]"
+    echo "  --wine-version       Wine version to download; required unless --no-wine"
+    echo "  --wine-sha256        Expected SHA-256 of the Wine archive; required unless --no-wine"
     echo "  --yabridge-branch    Yabridge git branch/ref (default: master)"
     echo "  --no-wine            Skip wine setup (use system wine)"
     echo "  --no-yabridge        Skip yabridge build"
+    echo ""
+    echo "Wine archives are only ever installed after their SHA-256 matches the"
+    echo "digest you supplied. Choose a release at $WINE_RELEASES_URL and obtain"
+    echo "its digest from a source you trust before installing it."
     exit "$status"
 }
 
@@ -105,7 +117,7 @@ require_option_value() {
     fi
 }
 
-WINE_VERSION="latest-staging"
+WINE_VERSION=""
 WINE_SHA256=""
 WINE_VERSION_EXPLICIT=false
 YABRIDGE_BRANCH="master"
@@ -137,8 +149,28 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-if [[ "$SKIP_WINE" == false && "$WINE_VERSION_EXPLICIT" == true && -z "$WINE_SHA256" ]]; then
+if [[ -n "$WINE_VERSION" && ! "$WINE_VERSION" =~ $WINE_VERSION_PATTERN ]]; then
+    err "--wine-version must match $WINE_VERSION_PATTERN: $WINE_VERSION"
+    exit 2
+fi
+# Installing Wine means executing bytes fetched over the network, so both the
+# release and the digest that release is expected to have are required before
+# anything is downloaded. Hashing whatever arrived and recording that hash
+# would only prove the transfer was intact, which is a different question from
+# whether these are the bytes anyone intended to run.
+if [[ "$SKIP_WINE" == false && "$WINE_VERSION_EXPLICIT" == true &&
+    -z "$WINE_SHA256" ]]; then
     err "--wine-sha256 is required with --wine-version"
+    err "Obtain the digest for wine-$WINE_VERSION-staging-amd64.tar.xz from a"
+    err "source you trust: $WINE_RELEASES_URL"
+    exit 2
+fi
+if [[ "$SKIP_WINE" == false && "$WINE_VERSION_EXPLICIT" != true ]]; then
+    err "--wine-version and --wine-sha256 are required to install Wine"
+    err "Choose a release at $WINE_RELEASES_URL, obtain the SHA-256 of"
+    err "wine-<version>-staging-amd64.tar.xz from a source you trust, then run:"
+    err "  $0 --wine-version <version> --wine-sha256 <digest>"
+    err "Pass --no-wine to skip Wine and keep using the system installation."
     exit 2
 fi
 if [[ -n "$WINE_SHA256" && ! "$WINE_SHA256" =~ ^[A-Fa-f0-9]{64}$ ]]; then
@@ -205,6 +237,11 @@ cleanup_stale_wine_candidates
 
 STATE_WINE_VERSION="$(read_state WINE_VERSION "$STATE_FILE" || true)"
 STATE_WINE_SHA256="$(read_state WINE_SHA256 "$STATE_FILE" || true)"
+# Carried forward exactly as recorded. Only a successful digest comparison in
+# this run may set it, so a state file written before this rule existed — or by
+# hand — stays unproven no matter how many times setup runs afterwards.
+STATE_WINE_SHA256_VERIFIED="$(read_state WINE_SHA256_VERIFIED "$STATE_FILE" ||
+    true)"
 STATE_YABRIDGE_REF="$(read_state YABRIDGE_REF "$STATE_FILE" || true)"
 STATE_YABRIDGE_COMMIT="$(read_state YABRIDGE_COMMIT "$STATE_FILE" || true)"
 
@@ -233,49 +270,20 @@ ok "Build dependencies ready"
 
 # ── Wine setup ────────────────────────────────────────────────────────────────
 if [[ "$SKIP_WINE" == false ]]; then
-    # Resolve the requested release before consulting the cache.
-    if [[ "$WINE_VERSION" == "latest-staging" ]]; then
-        info "Determining latest staging version..."
-        API="https://api.github.com/repos/Kron4ek/Wine-Builds/releases"
-        LATEST=$(curl -fsSL "$API" | python3 -c "
-import json, sys
-releases = json.load(sys.stdin)
-for r in releases:
-    for a in r.get('assets', []):
-        n = a['name']
-        # Match: wine-11.8-staging-amd64.tar.xz (not wow64, not tkg, not x86)
-        if ('staging' in n and n.endswith('amd64.tar.xz')
-                and 'wow64' not in n and 'tkg' not in n):
-            # Extract version: wine-11.8-staging-amd64.tar.xz -> 11.8
-            ver = n.replace('wine-', '').replace('-staging-amd64.tar.xz', '')
-            print(f'{ver}|{a[\"browser_download_url\"]}')
-            break
-    else:
-        continue
-    break
-")
-        if [[ -z "$LATEST" ]]; then
-            err "Could not determine latest wine-staging version"
-            err "Check https://github.com/Kron4ek/Wine-Builds/releases"
-            exit 1
-        fi
-        WINE_VER="${LATEST%%|*}"
-        WINE_URL="${LATEST##*|}"
-        info "Latest staging version: $WINE_VER"
-    else
-        WINE_VER="$WINE_VERSION"
-        WINE_URL="https://github.com/Kron4ek/Wine-Builds/releases/download/${WINE_VER}/wine-${WINE_VER}-staging-amd64.tar.xz"
-    fi
+    WINE_VER="$WINE_VERSION"
+    WINE_URL="$WINE_DOWNLOAD_URL/${WINE_VER}/wine-${WINE_VER}-staging-amd64.tar.xz"
 
+    # A cached install is reused only when the recorded state proves the same
+    # release, the same expected digest, *and* that the digest was actually
+    # compared. A record that merely repeats a hash somebody observed says
+    # nothing about the bytes now sitting in build/wine, so it is treated as
+    # no record at all and the archive is fetched and verified again.
     WINE_MATCHES=false
     if [[ -f "$WINE_DIR/bin/wine" ]] &&
-        component_matches WINE_VERSION "$WINE_VER" "$STATE_FILE"; then
-        if [[ -n "$WINE_SHA256" ]]; then
-            component_matches WINE_SHA256 "$WINE_SHA256" "$STATE_FILE" &&
-                WINE_MATCHES=true
-        elif read_state WINE_SHA256 "$STATE_FILE" >/dev/null; then
-            WINE_MATCHES=true
-        fi
+        component_matches WINE_VERSION "$WINE_VER" "$STATE_FILE" &&
+        component_matches WINE_SHA256 "$WINE_SHA256" "$STATE_FILE" &&
+        component_matches WINE_SHA256_VERIFIED true "$STATE_FILE"; then
+        WINE_MATCHES=true
     fi
 
     if [[ "$WINE_MATCHES" == true ]]; then
@@ -299,20 +307,17 @@ for r in releases:
             exit 1
         }
 
-        if [[ -n "$WINE_SHA256" ]]; then
-            if ! printf '%s  %s\n' "$WINE_SHA256" "$WINE_CANDIDATE_ARCHIVE" |
-                sha256sum -c - >/dev/null; then
-                err "Wine archive checksum mismatch"
-                exit 1
-            fi
-            ACTUAL_WINE_SHA256="$WINE_SHA256"
-        else
-            ACTUAL_WINE_SHA256="$(sha256sum "$WINE_CANDIDATE_ARCHIVE")" || {
-                err "Could not calculate Wine archive SHA-256"
-                exit 1
-            }
-            ACTUAL_WINE_SHA256="${ACTUAL_WINE_SHA256%% *}"
+        # The only path to an installed Wine. There is deliberately no branch
+        # that computes a digest from the download and treats the result as
+        # verification.
+        if ! printf '%s  %s\n' "$WINE_SHA256" "$WINE_CANDIDATE_ARCHIVE" |
+            sha256sum -c - >/dev/null; then
+            err "Wine archive checksum mismatch"
+            err "Expected $WINE_SHA256 for $WINE_URL"
+            err "Nothing was installed and any existing Wine is untouched."
+            exit 1
         fi
+        VERIFIED_WINE_SHA256="$WINE_SHA256"
 
         if ! ARCHIVE_ENTRIES="$(tar -tf "$WINE_CANDIDATE_ARCHIVE")"; then
             err "Could not inspect Wine archive"
@@ -409,8 +414,12 @@ PY
         trap - EXIT INT TERM
         ok "Wine-staging $WINE_VER extracted to $WINE_DIR"
 
+        # Reached only after sha256sum -c accepted the archive and the
+        # extracted candidate was activated, so this is the one place allowed
+        # to claim the digest was verified.
         STATE_WINE_VERSION="$WINE_VER"
-        STATE_WINE_SHA256="$ACTUAL_WINE_SHA256"
+        STATE_WINE_SHA256="$VERIFIED_WINE_SHA256"
+        STATE_WINE_SHA256_VERIFIED=true
     fi
 
     # Verify
@@ -479,6 +488,7 @@ assert_locked_build_identity
 write_state "$STATE_FILE" \
     "WINE_VERSION=$STATE_WINE_VERSION" \
     "WINE_SHA256=$STATE_WINE_SHA256" \
+    "WINE_SHA256_VERIFIED=$STATE_WINE_SHA256_VERIFIED" \
     "YABRIDGE_REF=$STATE_YABRIDGE_REF" \
     "YABRIDGE_COMMIT=$STATE_YABRIDGE_COMMIT"
 

@@ -22,7 +22,8 @@ stage_launcher_fixture() {
   COPY="$FIXTURE_ROOT/prefix-copy"
   ISOLATION="$FIXTURE_ROOT/isolation"
   ISOLATED_HOME="$ISOLATION/home"
-  LAUNCHER_MANIFEST="$ISOLATION/run-manifest.json"
+  RUN_STATE="$FIXTURE_ROOT/run-state"
+  LAUNCHER_MANIFEST="$RUN_STATE/run-manifest.json"
   YABRIDGE_HOME="$FIXTURE_ROOT/build/yabridge"
   STATE_FILE="$FIXTURE_ROOT/build/component-state.env"
   BWRAP_CALLS="$BATS_TEST_TMPDIR/bwrap.calls"
@@ -330,6 +331,47 @@ PY
     "$MANIFEST_BRIDGE_HOME/.clap/yabridge")" ]
 }
 
+# The digest alone says only which bytes were installed. What makes the record
+# meaningful is that setup compared those bytes against a digest the user
+# supplied, so the manifest publishes that fact and refuses to publish a run
+# whose Wine was never checked against anything.
+@test "run manifest records proof that the Wine digest was verified" {
+  load_run_manifest
+  stage_manifest_inputs "$MANIFEST_TREE"
+
+  write_manifest
+  [ "$status" -eq 0 ]
+
+  [ "$(manifest_json wine_digest_verified)" = "true" ]
+}
+
+@test "component state without a verified Wine digest refuses the run" {
+  load_run_manifest
+  stage_manifest_inputs "$MANIFEST_TREE"
+  printf 'WINE_VERSION=%s\nWINE_SHA256=%s\nYABRIDGE_REF=%s\nYABRIDGE_COMMIT=%s\n' \
+    "$FIXTURE_WINE_VERSION" "$FIXTURE_WINE_SHA256" "$FIXTURE_YABRIDGE_REF" \
+    "$FIXTURE_YABRIDGE_COMMIT" > "$MANIFEST_STATE"
+
+  write_manifest
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"WINE_SHA256_VERIFIED"* ]]
+  [ ! -e "$MANIFEST_DESTINATION" ]
+}
+
+@test "an unverified Wine digest is rejected by the pre-clone component check" {
+  load_run_manifest
+  stage_manifest_inputs "$MANIFEST_TREE"
+  printf 'WINE_VERSION=%s\nWINE_SHA256=%s\nWINE_SHA256_VERIFIED=false\nYABRIDGE_REF=%s\nYABRIDGE_COMMIT=%s\n' \
+    "$FIXTURE_WINE_VERSION" "$FIXTURE_WINE_SHA256" "$FIXTURE_YABRIDGE_REF" \
+    "$FIXTURE_YABRIDGE_COMMIT" > "$MANIFEST_STATE"
+
+  run assert_recorded_components "$MANIFEST_STATE"
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"WINE_SHA256_VERIFIED"* ]]
+}
+
 @test "run manifest records the source identity from validated provenance" {
   load_run_manifest
   stage_manifest_inputs "$MANIFEST_TREE"
@@ -428,7 +470,7 @@ manifest.json" MANIFEST_COMMAND
   [[ "$output" == *"component state"* ]]
 
   configure_manifest
-  printf 'WINE_VERSION=%s\nWINE_SHA256=%s\nYABRIDGE_REF=%s\nYABRIDGE_COMMIT=%s\n' \
+  printf 'WINE_VERSION=%s\nWINE_SHA256=%s\nWINE_SHA256_VERIFIED=true\nYABRIDGE_REF=%s\nYABRIDGE_COMMIT=%s\n' \
     "$FIXTURE_WINE_VERSION" "$FIXTURE_WINE_SHA256" "$FIXTURE_YABRIDGE_REF" \
     "48ea9749b682c48875366134a42073d6b3d0a8c" > "$MANIFEST_STATE"
   write_manifest
@@ -436,7 +478,7 @@ manifest.json" MANIFEST_COMMAND
   [[ "$output" == *"YABRIDGE_COMMIT"* ]]
 
   configure_manifest
-  printf 'WINE_VERSION=%s\nYABRIDGE_REF=%s\nYABRIDGE_COMMIT=%s\n' \
+  printf 'WINE_VERSION=%s\nWINE_SHA256_VERIFIED=true\nYABRIDGE_REF=%s\nYABRIDGE_COMMIT=%s\n' \
     "$FIXTURE_WINE_VERSION" "$FIXTURE_YABRIDGE_REF" \
     "$FIXTURE_YABRIDGE_COMMIT" > "$MANIFEST_STATE"
   write_manifest
@@ -1097,6 +1139,80 @@ EOF
   [ ! -e "$CALLS" ]
 }
 
+# Whether the installed Wine was ever checked against a digest somebody chose
+# is part of what a run is, so a project whose state cannot say so is refused
+# while refusing is still free.
+@test "an unverified Wine digest is refused before anything is cloned" {
+  stage_launcher_fixture
+  printf 'WINE_VERSION=%s\nWINE_SHA256=%s\nYABRIDGE_REF=%s\nYABRIDGE_COMMIT=%s\n' \
+    "$FIXTURE_WINE_VERSION" "$FIXTURE_WINE_SHA256" "$FIXTURE_YABRIDGE_REF" \
+    "$FIXTURE_YABRIDGE_COMMIT" > "$STATE_FILE"
+
+  run_launcher --prefix "$REAL_PREFIX" fake-daw
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"WINE_SHA256_VERIFIED"* ]]
+  [ ! -e "$COPY" ]
+  [ ! -e "$ISOLATION" ]
+  [ ! -e "$DAW_ENV_FILE" ]
+  [ ! -e "$CALLS" ]
+}
+
+@test "a launch records that its Wine digest was verified" {
+  stage_launcher_fixture
+
+  run_launcher --prefix "$REAL_PREFIX" fake-daw
+
+  [ "$status" -eq 0 ]
+  [ "$(launcher_manifest_json wine_digest_verified)" = "true" ]
+}
+
+# ── Where the record lives ───────────────────────────────────────────────────
+#
+# The manifest describes a run to whoever reads it afterwards, so the DAW that
+# run started must not be able to edit it. Everything the sandbox makes
+# writable is inside the clone or the isolation tree, so the record is kept
+# outside both, in a generated directory under the read-only project root.
+
+@test "a launch records outside every writable sandbox tree" {
+  stage_launcher_fixture
+
+  run_launcher --prefix "$REAL_PREFIX" fake-daw
+
+  [ "$status" -eq 0 ]
+  [ -f "$RUN_STATE/run-manifest.json" ]
+  [ ! -e "$ISOLATION/run-manifest.json" ]
+  [ ! -e "$COPY/run-manifest.json" ]
+  [ "$(launcher_manifest_json schema_version)" = "1" ]
+}
+
+@test "the run state directory is never made writable in the sandbox" {
+  stage_launcher_fixture
+
+  run_launcher --prefix "$REAL_PREFIX" fake-daw
+
+  [ "$status" -eq 0 ]
+  local recorded
+  recorded="$(launched_argv)"
+  [[ "$recorded" != *"--bind $(printf '%q' "$RUN_STATE")"* ]]
+  [[ "$recorded" == *"--ro-bind $(printf '%q %q' "$FIXTURE_ROOT" "$FIXTURE_ROOT")"* ]]
+}
+
+@test "a launch replaces a prior record and keeps it on refusal" {
+  stage_launcher_fixture
+
+  run_launcher --prefix "$REAL_PREFIX" fake-daw
+  [ "$status" -eq 0 ]
+  local first
+  first="$(cat "$LAUNCHER_MANIFEST")"
+
+  # A refusal reached after the manifest directory exists must leave the last
+  # complete record exactly as it was.
+  run_launcher --prefix "$REAL_PREFIX" --native-plugin-path / fake-daw
+  [ "$status" -ne 0 ]
+  [ "$(cat "$LAUNCHER_MANIFEST")" = "$first" ]
+}
+
 # The generated environment is what names the components a run records, and
 # whether it exists is knowable before anything is created — a project that was
 # never set up should not be told so only after it has been cloned.
@@ -1186,6 +1302,38 @@ EOF
   [ "$(launcher_manifest_json wine_diagnostics.quiet)" = "false" ]
   [ "$(launcher_manifest_json wine_diagnostics.winedebug)" = "null" ]
   [[ "$(launched_argv)" == *" --unshare-net "* ]]
+  [ "$(daw_env_value WINEDEBUG)" = "<unset>" ]
+}
+
+# env.sh is generated by setup.sh, lives in the project tree and is sourced
+# after the command line has already been parsed and validated. A stale copy
+# from an older setup — or an edited one — must not be able to reach back and
+# change what the command line decided.
+@test "a stale generated environment cannot change the security policy" {
+  stage_launcher_fixture
+  local elsewhere="$BATS_TEST_TMPDIR/elsewhere"
+  mkdir -p "$elsewhere"
+  cat >> "$FIXTURE_ROOT/env.sh" <<EOF
+SANDBOX_NETWORK=true
+SANDBOX_WRITABLE_PATHS=("$elsewhere")
+QUIET_WINE=true
+HOME="$elsewhere"
+SANDBOX_DAW_PATH="$FIXTURE_BIN/wine"
+SANDBOX_UNSHARE_USER=false
+EOF
+
+  run_launcher --prefix "$REAL_PREFIX" fake-daw
+
+  [ "$status" -eq 0 ]
+  [ "$(launcher_manifest_json sandbox.network)" = "false" ]
+  [ "$(launcher_manifest_json wine_diagnostics.quiet)" = "false" ]
+  [ "$(launcher_manifest_json sandbox.namespace_mode)" = '"user"' ]
+  [ "$(launcher_manifest daw_executable)" = "$FIXTURE_BIN/fake-daw" ]
+  local recorded
+  recorded="$(launched_argv)"
+  [[ "$recorded" == *" --unshare-net "* ]]
+  [[ "$recorded" != *"--bind $(printf '%q' "$elsewhere")"* ]]
+  [[ "$recorded" == *"--setenv HOME $(printf '%q' "$ISOLATED_HOME")"* ]]
   [ "$(daw_env_value WINEDEBUG)" = "<unset>" ]
 }
 

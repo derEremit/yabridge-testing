@@ -115,7 +115,7 @@ copy_launcher_libraries() {
 seed_component_state_file() {
   local file="$1"
   mkdir -p "$(dirname -- "$file")"
-  printf 'WINE_VERSION=%s\nWINE_SHA256=%s\nYABRIDGE_REF=%s\nYABRIDGE_COMMIT=%s\n' \
+  printf 'WINE_VERSION=%s\nWINE_SHA256=%s\nWINE_SHA256_VERIFIED=true\nYABRIDGE_REF=%s\nYABRIDGE_COMMIT=%s\n' \
     "$FIXTURE_WINE_VERSION" "$FIXTURE_WINE_SHA256" "$FIXTURE_YABRIDGE_REF" \
     "$FIXTURE_YABRIDGE_COMMIT" > "$file"
 }

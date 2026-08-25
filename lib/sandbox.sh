@@ -139,6 +139,108 @@ sandbox_canonical_alias() {
     return 0
 }
 
+# The locations the sandbox creates for itself: kernel interfaces, the private
+# scratch space, the private runtime directory and the display socket
+# directory. Nothing a caller names may be one of these or sit above one,
+# because Bubblewrap applies operations in order and a caller-supplied bind is
+# planned after all of them.
+sandbox_owned_destinations() {
+    printf '%s\n' /proc /dev /tmp "/run/user/$(id -u)"
+    [[ -n "$SANDBOX_X11_DESTINATION_DIR" ]] &&
+        printf '%s\n' "$SANDBOX_X11_DESTINATION_DIR"
+    return 0
+}
+
+# True for a system root this sandbox already binds read-only in full. A
+# directory inside one of those is visible read-only at its own path whether or
+# not anyone names it, so naming it adds no mount and can shadow nothing.
+sandbox_is_read_only_system_root() {
+    local candidate="$1"
+    local root
+
+    for root in "${SANDBOX_SYSTEM_ROOTS[@]}"; do
+        [[ "$root" == "$candidate" ]] || continue
+        [[ -d "$root" && ! -L "$root" ]] && return 0
+    done
+    return 1
+}
+
+# `--native-plugin-path` is the one option that both adds a read-only bind and
+# puts a directory on the DAW's plugin search path, so a bad value is dangerous
+# twice over: a broad bind planned this late replaces the narrower mounts
+# already decided, and a path that reaches production bridges puts production
+# yabridge back in front of the DAW.
+#
+# The value must therefore be a canonical directory that is neither the
+# filesystem root, nor at or above the real home, nor at or above anything the
+# sandbox owns, nor overlapping production, project, clone or isolation state
+# under either its own name or the canonical name of a symlinked plugin root.
+# The single allowance is a directory *inside* a read-only system root such as
+# `/usr/lib/vst3`, which is already exposed exactly as it would be bound.
+validate_sandbox_native_plugin_path() {
+    local value="${1:-}"
+    local canonical tree
+
+    sandbox_assert_plain_path "--native-plugin-path" "$value" || return 1
+    if ! canonical="$(realpath -e -- "$value" 2>/dev/null)"; then
+        sandbox_error "--native-plugin-path does not exist: $value"
+        return 1
+    fi
+    if [[ "$canonical" != "$value" ]]; then
+        sandbox_error "--native-plugin-path must be a canonical path without symlinks: $value -> $canonical"
+        return 1
+    fi
+    if [[ ! -d "$canonical" ]]; then
+        sandbox_error "--native-plugin-path is not a directory: $canonical"
+        return 1
+    fi
+    if [[ "$canonical" == / ]]; then
+        sandbox_error "--native-plugin-path must not be the filesystem root: $canonical"
+        return 1
+    fi
+    if sandbox_path_within "$HOME" "$canonical"; then
+        sandbox_error "--native-plugin-path would expose the real home ($HOME): $canonical"
+        return 1
+    fi
+    while IFS= read -r tree; do
+        if sandbox_path_within "$tree" "$canonical"; then
+            sandbox_error "--native-plugin-path would shadow the sandbox mount at $tree: $canonical"
+            return 1
+        fi
+    done < <(sandbox_owned_destinations)
+    while IFS= read -r tree; do
+        sandbox_path_within "$canonical" "$tree" ||
+            sandbox_path_within "$tree" "$canonical" || continue
+        if [[ "$canonical" != "$tree" ]] &&
+            sandbox_path_within "$canonical" "$tree" &&
+            sandbox_is_read_only_system_root "$tree"; then
+            continue
+        fi
+        sandbox_error "--native-plugin-path overlaps protected state ($tree): $canonical"
+        return 1
+    done < <(sandbox_protected_trees)
+}
+
+# A prefix that lives inside this project would be cloned into itself, bound
+# read-only and writable at once, and recorded as the source of its own clone.
+sandbox_assert_source_prefix() {
+    local prefix="$SANDBOX_REAL_PREFIX"
+    local tree
+
+    if [[ -z "$prefix" ]]; then
+        sandbox_error "the source prefix was not set; refusing to plan a sandbox"
+        return 1
+    fi
+    for tree in "$SANDBOX_PROJECT_ROOT" "$SANDBOX_CLONE" "$SANDBOX_ISOLATION"; do
+        [[ -n "$tree" ]] || continue
+        if sandbox_path_within "$prefix" "$tree"; then
+            sandbox_error "the source prefix is inside project state ($tree): $prefix"
+            echo "Clone a prefix that lives outside this project tree." >&2
+            return 1
+        fi
+    done
+}
+
 validate_writable_path() {
     local value="${1:-}"
     local canonical existing tree
@@ -284,14 +386,26 @@ sandbox_require_resolved_daw() {
 # of the clone and the bridge sync, so a rejected input costs the user nothing
 # and leaves no state behind.
 assert_sandbox_inputs() {
-    local name root
+    local name root native count index earlier
 
     sandbox_require_resolved_daw || return 1
     sandbox_daw_install_root "$SANDBOX_DAW_PATH" > /dev/null || return 1
+    sandbox_assert_source_prefix || return 1
     for name in "${SANDBOX_PLUGIN_ROOT_NAMES[@]}"; do
         root="$HOME/$name"
         [[ -e "$root" || -L "$root" ]] || continue
         sandbox_plugin_root_target "$root" > /dev/null || return 1
+    done
+    count="${#SANDBOX_NATIVE_PLUGIN_PATHS[@]}"
+    for ((index = 0; index < count; index++)); do
+        native="${SANDBOX_NATIVE_PLUGIN_PATHS[index]}"
+        validate_sandbox_native_plugin_path "$native" || return 1
+        for ((earlier = 0; earlier < index; earlier++)); do
+            if [[ "${SANDBOX_NATIVE_PLUGIN_PATHS[earlier]}" == "$native" ]]; then
+                sandbox_error "--native-plugin-path was already given: $native"
+                return 1
+            fi
+        done
     done
 }
 
@@ -672,18 +786,12 @@ build_bwrap_command() {
     __sandbox_install="$(sandbox_daw_install_root "$SANDBOX_DAW_PATH")" ||
         return 1
     sandbox_add_read_only_input "$__sandbox_install" || return 1
+    # Validated again where it is enforced. The preflight moves this refusal in
+    # front of the clone and the bridge sync; this is the copy that decides
+    # what is actually mounted.
     for __sandbox_entry in ${SANDBOX_NATIVE_PLUGIN_PATHS[@]+"${SANDBOX_NATIVE_PLUGIN_PATHS[@]}"}; do
-        if ! __sandbox_canonical="$(realpath -e -- "$__sandbox_entry" \
-            2>/dev/null)"; then
-            sandbox_error "native plugin path does not resolve: $__sandbox_entry"
-            return 1
-        fi
-        if sandbox_path_within "$__sandbox_canonical" "$__sandbox_clone" ||
-            sandbox_path_within "$__sandbox_canonical" "$__sandbox_isolation"; then
-            sandbox_error "native plugin path overlaps invocation-owned state: $__sandbox_canonical"
-            return 1
-        fi
-        sandbox_add_read_only_input "$__sandbox_canonical" || return 1
+        validate_sandbox_native_plugin_path "$__sandbox_entry" || return 1
+        sandbox_add_read_only_input "$__sandbox_entry" || return 1
     done
 
     # Writable state: the validated clone, this invocation's isolation tree,

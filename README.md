@@ -1,6 +1,7 @@
 # Yabridge Staging — Isolated Test Infrastructure
 
-Build and test **yabridge git master** with **latest wine-staging** in complete
+Build and test **yabridge git master** with a **pinned, digest-verified
+wine-staging build** in complete
 isolation. No system files are touched — everything lives in `build/`,
 `prefix/`, and `prefix-copy/`. Your existing yabridge + wine setup (e.g. wine
 9.21) and your real Wine prefixes stay untouched.
@@ -44,7 +45,8 @@ isolation. No system files are touched — everything lives in `build/`,
 ├── prefix/           # isolated WINEPREFIX (created by setup.sh)
 ├── prefix-copy/      # COW clone of your real prefix (created by daw-env.sh)
 ├── isolation/        # isolated HOME/XDG + bridges (created by daw-env.sh)
-│   ├── home/         # generated bridges, on VST_PATH/VST3_PATH/CLAP_PATH
+│   └── home/         # generated bridges, on VST_PATH/VST3_PATH/CLAP_PATH
+├── run-state/        # created by daw-env.sh, never writable inside the sandbox
 │   └── run-manifest.json  # what the last launch actually was
 └── yabridge-test-infra/
     └── test-harness/  # Python test harness CLI
@@ -54,14 +56,39 @@ isolation. No system files are touched — everything lives in `build/`,
 
 ### First time
 
+Installing Wine means running bytes fetched over the network, so `setup.sh`
+will not install Wine until you have told it *which* release you want and what
+that release's SHA-256 is. It never derives the expected digest from the file
+it just downloaded: hashing whatever arrived would only prove the transfer was
+intact, which is a different question from whether these are the bytes anyone
+intended to run.
+
+Choosing that digest is your job, and it is the one step this project cannot do
+for you:
+
+1. Pick a release at
+   <https://github.com/Kron4ek/Wine-Builds/releases> and note its version, for
+   example `11.8`. The archive is `wine-<version>-staging-amd64.tar.xz`.
+2. Obtain the SHA-256 of that archive from a source you trust — the release
+   page, a signed checksum file, a copy you already verified on another
+   machine, or a colleague who did. Do not take it from an unverified download
+   on the machine you are about to install onto.
+3. Run setup with both:
+
 ```bash
-./setup.sh
+./setup.sh --wine-version 11.8 --wine-sha256 <64-character-sha256>
 ```
 
-This will:
+Or skip Wine entirely and keep using the system installation:
+
+```bash
+./setup.sh --no-wine
+```
+
+Setup will:
 1. Install build deps (`base-devel`, `meson`, `ninja`, `wine`, `libxcb`)
-2. Fetch latest wine-staging from Kron4ek → verify and atomically activate it
-   at `build/wine/`
+2. Download the Wine release you named, compare it against the digest you gave,
+   and only then atomically activate it at `build/wine/`
 3. Clone yabridge git master → `build/yabridge-src/`
 4. Build with meson/ninja → `build/yabridge/`
 5. Create `yabridge-test-infra/test-harness/.venv` and install the local
@@ -69,20 +96,23 @@ This will:
 6. Generate `env.sh` and `test.sh`
 7. Initialize an isolated WINEPREFIX at `prefix/`
 
+A mismatch installs nothing and leaves any working Wine exactly where it was.
+Success records `WINE_SHA256_VERIFIED=true` in `build/component-state.env`, and
+that record is what a launch requires: state that merely repeats a hash
+somebody observed is treated as no record at all, and the archive is fetched and
+compared again.
+
 ### Update components
 
 ```bash
-# Rebuild yabridge from latest master
+# Rebuild yabridge from latest master, leaving Wine alone
 ./setup.sh --no-wine
 
-# Update wine to latest staging (will re-download)
-./setup.sh --no-yabridge
-
-# Pin a specific wine version and verify the downloaded archive
-./setup.sh --wine-version 11.7 --wine-sha256 <64-character-sha256>
+# Move to a different Wine release (re-downloads and re-verifies)
+./setup.sh --no-yabridge --wine-version 11.9 --wine-sha256 <64-character-sha256>
 
 # Build a specific yabridge branch
-./setup.sh --yabridge-branch develop
+./setup.sh --yabridge-branch develop --no-wine
 ```
 
 ## Usage
@@ -139,7 +169,7 @@ refuses to start your DAW rather than running it unsandboxed.
 4. Generates yabridge bridges inside `isolation/home/`, an isolated HOME/XDG
    tree that only references the clone.
 5. Builds a Bubblewrap argv array, then re-checks every identity the run
-   depends on and records it in `isolation/run-manifest.json`.
+   depends on and records it in `run-state/run-manifest.json`.
 6. `exec`s the sandbox. Your DAW arguments are passed through unchanged — no
    shell re-parses them.
 
@@ -179,6 +209,7 @@ narrower ones.
 | production Wine prefix | **read-only** | never written, never upgraded |
 | `~/.vst`, `~/.vst3`, `~/.clap` | **read-only** | production bridges cannot be modified, and are not on any plugin path. A plugin root that is a symlink is exposed read-only at its canonical target, so storage elsewhere is protected under its real name too |
 | DAW install root, `--native-plugin-path` | read-only | the DAW's own files. A `bin` directory is widened to the install root beside it, but never inside your home — a DAW under `~/…/bin` gets that `bin` directory alone |
+| `run-state/` | read-only | inside the project tree, so the DAW cannot rewrite the record of its own run |
 | `prefix-copy/` | writable | the validated clone |
 | `isolation/` | writable | the isolated HOME/XDG and bridge tree |
 | `--writable-path DIR` | writable | your projects and rendered output |
@@ -202,6 +233,20 @@ canonical name of a symlinked plugin root. Outside those writable mounts the DAW
 either fails to write or writes into the private tmpfs that disappears with the
 run, so save projects and renders into a path you approved.
 
+**Native plugin directories:** `--native-plugin-path DIR` is repeatable and
+held to the same standard, for two reasons at once. The directory is bound
+read-only *and* placed on the DAW's plugin search path, so a broad value both
+shadows the narrower mounts already planned and can put production bridges back
+in front of the DAW. `DIR` must be an existing canonical directory, and it is
+rejected when it is the filesystem root, at or above your real home, at or
+above anything the sandbox creates for itself (`/proc`, `/dev`, `/tmp`, the XDG
+runtime directory, the display socket directory), or overlapping the production
+prefix, a production plugin root, the project tree, the clone or the isolation
+tree — under either its own name or the canonical name of a symlinked plugin
+root. A directory *inside* a system root the sandbox already binds read-only in
+full, such as `/usr/lib/vst3`, is allowed: it adds no mount and shadows
+nothing. Every one of these refusals happens before the prefix is cloned.
+
 **Failure diagnostics:**
 
 | Message | Meaning |
@@ -210,6 +255,10 @@ run, so save projects and renders into a path you approved.
 | `Error: bubblewrap cannot create the namespaces this launcher requires` | kernel policy blocks it. The exact probe commands and what `bwrap` said are printed; enable unprivileged user namespaces (`sudo sysctl -w kernel.unprivileged_userns_clone=1`) or install a setuid `bwrap` |
 | `Error: --writable-path overlaps protected state (...)` | the path would make production or invocation-owned state writable |
 | `Error: --writable-path must be a canonical path without symlinks` | pass the resolved path, e.g. from `realpath` |
+| `Error: --native-plugin-path would shadow the sandbox mount at ...` | the directory is at or above something the sandbox creates for itself; name the plugin directory itself |
+| `Error: --native-plugin-path overlaps protected state (...)` | the directory would expose production bridges or invocation-owned state to the DAW |
+| `Error: the source prefix is inside project state (...)` | `--prefix` names something in this repo, its clone or its isolation tree; clone a prefix that lives outside the project |
+| `Error: component state does not record WINE_SHA256_VERIFIED=true` | the installed Wine was never compared against a digest you chose. Reinstall with `./setup.sh --wine-version <version> --wine-sha256 <digest>` |
 | `Error: '<daw>' was not found in PATH as an executable file` | the DAW is resolved before any mount is planned |
 | `Error: the DAW install root would expose the real home (...)` | the DAW binary sits directly in `$HOME`. Move it into its own directory — binding all of `$HOME` read-only is the shortcut this launcher refuses |
 | `Error: the production plugin root ... is a symlink that does not resolve` | a dangling `~/.vst`-style symlink. The launcher will not run when it cannot see the bridges it is meant to protect; repair or remove the link |
@@ -221,7 +270,7 @@ and before the DAW starts.
 
 A sandbox is only worth as much as your ability to say what ran inside it.
 Before the DAW starts — and after every other check has passed — the launcher
-writes `isolation/run-manifest.json`, the record of what the run *actually*
+writes `run-state/run-manifest.json`, the record of what the run *actually*
 was:
 
 ```json
@@ -254,6 +303,7 @@ was:
   "wine_executable": "/home/you/yabridge-staging/build/wine/bin/wine",
   "wine_installed_version": "11.8",
   "wine_requested_version": "11.8",
+  "wine_digest_verified": true,
   "wine_sha256": "6c6f642b0954248493ebbd86ec232c46a6b9cf97c747ab3f1bcb707a22efed1d",
   "wine_version_string": "wine-11.8 (Staging)",
   "yabridge_commit": "48ea9749b682c48875366134a42073d6b3d0a8c4",
@@ -283,6 +333,10 @@ phase believed:
   a clone swapped after validation is refused;
 - the Wine executable is asked for its version again, and it must match the
   version `setup.sh` recorded in `build/component-state.env`;
+- `wine_digest_verified` is only ever `true`, because a launch requires
+  `WINE_SHA256_VERIFIED=true` in component state and refuses otherwise. The
+  field is written so a manifest read later says on its own terms that the Wine
+  it names was compared against a digest a person chose;
 - component state is *parsed*, never sourced, so nothing in that file can run
   as shell code;
 - the bridge roots must canonicalize inside `isolation/`;
@@ -297,6 +351,12 @@ atomically renames it over the old manifest. So the file is always a complete
 document: either the new one or the one before it. A symlinked
 `run-manifest.json` is refused rather than followed, and a failed write removes
 only the temporary this invocation created.
+
+The manifest lives in `run-state/` rather than in `isolation/` because
+`isolation/` is writable inside the sandbox and the project tree is not. The
+DAW the manifest describes can read its own record and cannot change it: an
+attempt to rewrite, append to, truncate or unlink it fails with `EROFS`, and
+the file's checksum is the same after the run as it was when the DAW started.
 
 **If the manifest cannot be written, the DAW does not start.** That is
 deliberate: a run nobody can identify afterwards is exactly the run you will
@@ -415,13 +475,18 @@ Yabridge Version  5.1.1              # ← git master @ 48ea974
 ### `setup.sh`
 
 Idempotent. Skips already-completed steps. Flags:
-- `--wine-version <ver>` — pin a specific wine version (default: latest-staging)
-- `--wine-sha256 <digest>` — required with `--wine-version`; verifies the
-  archive before extraction
+- `--wine-version <ver>` — the wine release to install; required unless
+  `--no-wine`. Must be a plain version token, so it can never name a path
+- `--wine-sha256 <digest>` — the SHA-256 that release is expected to have;
+  required unless `--no-wine`. Compared before extraction
 - `--yabridge-branch <ref>` — build a specific branch/commit (default: master)
 - `--no-wine` — skip wine (rebuild yabridge only)
 - `--no-yabridge` — skip yabridge (re-download wine only)
 - `-h` / `--help` — usage
+
+There is no default wine version and no way to have setup supply the digest for
+you. See [First time](#first-time) for why, and for where to get a digest you
+can trust.
 
 Wine archives are rejected if their digest does not match or if any entry uses
 an absolute or parent-traversing path. Extraction and executable validation
@@ -437,6 +502,16 @@ it locked and re-checks them before each mutation phase (stale-candidate
 cleanup, Wine download and activation, the yabridge build, and the state file
 write). If `build/` was renamed away and a new directory put in its place, setup
 aborts rather than writing into a directory it does not own.
+
+That lock covers setup against setup. It does not cover setup against a launch
+already in flight: `daw-env.sh` resolves and records the exact Wine and
+yabridge executables it will use, but a `setup.sh` that atomically replaces
+`build/wine` in the window between that resolution and `exec` would leave the
+manifest naming a path whose contents have since changed. Closing that properly
+means holding the build lock across a whole DAW session, which would make a
+running DAW block every setup — a worse trade than the race. Do not run
+`./setup.sh` while a DAW is running, and if you do, treat that session's
+manifest as describing what was resolved rather than what finished the run.
 
 That check is a consistency guard, not a security boundary. Bash cannot open
 files relative to an already-open directory descriptor, so a small window
@@ -488,7 +563,7 @@ and before any bridge is generated, so an unusable sandbox costs you nothing
 and never falls back to an unsandboxed launch. See
 [The sandbox boundary](#the-sandbox-boundary) for the full mount table.
 
-Every launch records its exact identity in `isolation/run-manifest.json` after
+Every launch records its exact identity in `run-state/run-manifest.json` after
 the last check passes and before the DAW starts; if it cannot be recorded, the
 DAW does not run. See [The run manifest](#the-run-manifest).
 
@@ -565,28 +640,28 @@ is missing (run `./setup.sh`), the Wine executable no longer reports the version
 setup recorded (re-run `./setup.sh --no-yabridge`), or `prefix-copy/` is no
 longer the clone whose provenance was validated (`./daw-env.sh --fresh <daw>`).
 The first two are checked before the prefix is cloned, so they cost nothing. The
-DAW is not started and `isolation/run-manifest.json` from your last successful
+DAW is not started and `run-state/run-manifest.json` from your last successful
 launch is left untouched.
 
 If the message says the destination is a symlink or is not a regular file,
-something replaced `isolation/run-manifest.json` — the launcher will not write
+something replaced `run-state/run-manifest.json` — the launcher will not write
 through it, because this run's provenance would land wherever that points. The
 refusal prints what to look at and what to remove:
 
 ```bash
-ls -l -- isolation/run-manifest.json   # see what it actually is
-rm -- isolation/run-manifest.json      # only if it is the link, not your data
+ls -l -- run-state/run-manifest.json   # see what it actually is
+rm -- run-state/run-manifest.json      # only if it is the link, not your data
 ```
 
-The next launch writes a fresh manifest. Nothing else in `isolation/` is
-touched, so your generated bridges stay as they were.
+The next launch writes a fresh manifest. Nothing else in `run-state/` is
+touched.
 
 ### Wine output is too noisy, or too quiet
 
 Wine's diagnostics are no longer suppressed for you. Pass `--quiet-wine` for a
 silent run, or set `WINEDEBUG` yourself (`WINEDEBUG=+relay ./daw-env.sh reaper`)
 — see [Wine diagnostics](#wine-diagnostics). Check
-`isolation/run-manifest.json` if you want to know which of the two the last run
+`run-state/run-manifest.json` if you want to know which of the two the last run
 actually used.
 
 ### License activation fails

@@ -193,6 +193,88 @@ run_setup_fixture() {
   [[ "$output" == *"--wine-sha256 is required with --wine-version"* ]]
 }
 
+# Downloading an artifact and hashing it yourself proves only that the bytes
+# arrived intact. A setup that installs Wine therefore has to be told which
+# release to install and which digest that release is expected to have, before
+# a single byte is fetched.
+@test "bare setup refuses to install Wine without a pinned version and digest" {
+  run_setup_fixture --no-yabridge
+
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"--wine-version and --wine-sha256 are required"* ]]
+  [[ "$output" == *"--no-wine"* ]]
+  refute grep -q '^curl ' "$CALLS"
+  [ ! -e "$FIXTURE/build/wine" ]
+}
+
+@test "setup rejects a Wine version that could escape the build directory" {
+  run_setup_fixture --no-yabridge --wine-version '../../escape' \
+    --wine-sha256 "$WINE_11_8_SHA"
+
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"--wine-version"* ]]
+  refute grep -q '^curl ' "$CALLS"
+}
+
+# An earlier setup recorded the digest it observed, not one anybody vouched
+# for. Reusing that as if it had been verified is exactly the claim this
+# project must not make, so the archive is fetched and checked again.
+@test "recorded Wine state is only reused when its digest was verified" {
+  seed_wine_cache
+  printf 'WINE_VERSION=11.8\nWINE_SHA256=%s\n' "$WINE_11_8_SHA" \
+    > "$FIXTURE/build/component-state.env"
+
+  run_setup_fixture --no-yabridge --wine-version 11.8 \
+    --wine-sha256 "$WINE_11_8_SHA"
+
+  [ "$status" -eq 0 ]
+  grep -q "curl .*wine-11.8-staging-amd64.tar.xz" "$CALLS"
+  grep -Fxq "WINE_SHA256_VERIFIED=true" "$FIXTURE/build/component-state.env"
+}
+
+@test "a verified Wine install is reused without downloading again" {
+  seed_wine_cache
+  printf 'WINE_VERSION=11.8\nWINE_SHA256=%s\nWINE_SHA256_VERIFIED=true\n' \
+    "$WINE_11_8_SHA" > "$FIXTURE/build/component-state.env"
+
+  run_setup_fixture --no-yabridge --wine-version 11.8 \
+    --wine-sha256 "$WINE_11_8_SHA"
+
+  [ "$status" -eq 0 ]
+  refute grep -q '^curl ' "$CALLS"
+  [ -f "$FIXTURE/build/wine/prior-install" ]
+  grep -Fxq "WINE_SHA256_VERIFIED=true" "$FIXTURE/build/component-state.env"
+}
+
+# Skipping Wine leaves whatever the last install proved. It must not turn an
+# unproven record into a proven one on the way past.
+@test "skipping Wine cannot promote an unverified digest to verified" {
+  seed_wine_cache
+  printf 'WINE_VERSION=11.8\nWINE_SHA256=%s\n' "$WINE_11_8_SHA" \
+    > "$FIXTURE/build/component-state.env"
+
+  run_setup_fixture --no-wine --no-yabridge
+
+  [ "$status" -eq 0 ]
+  refute grep -Fxq "WINE_SHA256_VERIFIED=true" \
+    "$FIXTURE/build/component-state.env"
+  grep -Fxq "WINE_SHA256=$WINE_11_8_SHA" "$FIXTURE/build/component-state.env"
+}
+
+@test "a rejected digest never records a verified Wine install" {
+  seed_wine_cache
+  seed_wine_state
+  FAKE_SHA_VALUE="$WRONG_WINE_SHA"
+
+  run_setup_fixture --no-yabridge --wine-version 11.8 \
+    --wine-sha256 "$WINE_11_8_SHA"
+
+  [ "$status" -eq 1 ]
+  assert_prior_wine_preserved
+  refute grep -Fxq "WINE_SHA256_VERIFIED=true" \
+    "$FIXTURE/build/component-state.env"
+}
+
 @test "different requested Wine version replaces cached Wine" {
   seed_wine_cache
   seed_component_state WINE_VERSION 11.7

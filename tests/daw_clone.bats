@@ -227,23 +227,27 @@ write_provenance() {
   [ "$(cat "$target/sentinel")" = "do not touch" ]
 }
 
-@test "launcher rejects source and clone equality without deleting the source" {
+# A source that is the clone destination, the project root, or anything under
+# either is refused by the input preflight before the clone code is reached at
+# all. The clone's own equality and nesting checks below remain the last line
+# of defence for a source that reaches them from outside the project.
+@test "launcher rejects a source that is the clone destination" {
   make_prefix "$FIXTURE_ROOT/prefix-copy"
 
   run_daw_fixture --prefix "$FIXTURE_ROOT/prefix-copy" fake-daw
 
   [ "$status" -ne 0 ]
-  [[ "$output" == *"source and clone paths must be separate"* ]]
+  [[ "$output" == *"source prefix is inside project state"* ]]
   [ -f "$FIXTURE_ROOT/prefix-copy/system.reg" ]
 }
 
-@test "launcher rejects a clone nested inside its source" {
+@test "launcher rejects a source that is the project root" {
   make_prefix "$FIXTURE_ROOT"
 
   run_daw_fixture --prefix "$FIXTURE_ROOT" fake-daw
 
   [ "$status" -ne 0 ]
-  [[ "$output" == *"source and clone paths must not be nested"* ]]
+  [[ "$output" == *"source prefix is inside project state"* ]]
   [ -f "$FIXTURE_ROOT/system.reg" ]
 }
 
@@ -253,8 +257,24 @@ write_provenance() {
   run_daw_fixture --prefix "$FIXTURE_ROOT/prefix-copy/source" fake-daw
 
   [ "$status" -ne 0 ]
-  [[ "$output" == *"source and clone paths must not be nested"* ]]
+  [[ "$output" == *"source prefix is inside project state"* ]]
   [ -f "$FIXTURE_ROOT/prefix-copy/source/system.reg" ]
+}
+
+@test "clone state refuses equal and nested source and clone paths" {
+  source "$PROJECT_ROOT/lib/clone-state.sh"
+
+  run assert_separate_clone_paths "$SOURCE" "$SOURCE"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"source and clone paths must be separate"* ]]
+
+  run assert_separate_clone_paths "$SOURCE" "$SOURCE/nested"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"source and clone paths must not be nested"* ]]
+
+  run assert_separate_clone_paths "$SOURCE/nested" "$SOURCE"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"source and clone paths must not be nested"* ]]
 }
 
 @test "launcher canonicalizes a symlinked launch path before nesting checks" {

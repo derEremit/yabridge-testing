@@ -978,6 +978,147 @@ $BATS_TEST_TMPDIR"
   [[ "$output" == *"already"* ]]
 }
 
+# ── Native plugin directories ────────────────────────────────────────────────
+#
+# `--native-plugin-path` adds a read-only bind late in the mount plan and puts
+# the same directory on VST_PATH. Both halves are dangerous when the value is
+# broad: Bubblewrap applies mounts in order, so a late broad bind replaces the
+# narrower decisions already made, and a plugin path that reaches production
+# bridges reintroduces exactly the production yabridge this launcher exists to
+# keep out of an isolated run.
+
+@test "native plugin paths reject roots that would shadow the sandbox" {
+  load_sandbox
+  configure_sandbox
+
+  local broad
+  for broad in / /proc /dev /tmp /run /usr "$PRODUCTION_HOME" \
+    "$BATS_TEST_TMPDIR"; do
+    [ -d "$broad" ] || continue
+    run validate_sandbox_native_plugin_path "$broad"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"--native-plugin-path"* ]]
+  done
+}
+
+@test "native plugin paths reject production plugin roots and their aliases" {
+  load_sandbox
+  local target="$BATS_TEST_TMPDIR/external-vst"
+  alias_plugin_root .vst "$target"
+  configure_sandbox
+
+  run validate_sandbox_native_plugin_path "$PRODUCTION_HOME/.vst3/yabridge"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"protected"* ]]
+
+  # The canonical name of a symlinked plugin root is the same production
+  # bridges under a different spelling.
+  run validate_sandbox_native_plugin_path "$target/yabridge"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"protected"* ]]
+
+  run validate_sandbox_native_plugin_path "$PRODUCTION_HOME/.vst"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"canonical"* ]]
+}
+
+@test "native plugin paths reject project, prefix, clone and isolation trees" {
+  load_sandbox
+  configure_sandbox
+  mkdir -p "$COPY/drive_c/plugins"
+
+  local protected
+  for protected in "$FIXTURE_ROOT" "$YABRIDGE_HOME" "$REAL_PREFIX" \
+    "$REAL_PREFIX/drive_c" "$COPY" "$COPY/drive_c/plugins" "$ISOLATION" \
+    "$ISOLATED_HOME/.vst/yabridge"; do
+    run validate_sandbox_native_plugin_path "$protected"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"protected"* ]]
+  done
+}
+
+@test "native plugin paths reject a repeated directory" {
+  load_sandbox
+  configure_sandbox
+  mkdir -p "$BATS_TEST_TMPDIR/native"
+  resolve_daw_executable fake-daw
+  SANDBOX_NATIVE_PLUGIN_PATHS=("$BATS_TEST_TMPDIR/native"
+    "$BATS_TEST_TMPDIR/native")
+
+  run assert_sandbox_inputs
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"already"* ]]
+}
+
+# A directory inside a system root the sandbox already binds read-only in full
+# is what this option is for: it adds no mount, shadows nothing, and the DAW
+# sees the same read-only content it would have seen anyway.
+@test "native plugin paths accept a narrow system plugin directory" {
+  load_sandbox
+  configure_sandbox
+  [ -d /usr/lib/vst3 ] || skip "no system VST3 directory at /usr/lib/vst3"
+
+  run validate_sandbox_native_plugin_path /usr/lib/vst3
+  [ "$status" -eq 0 ]
+
+  SANDBOX_NATIVE_PLUGIN_PATHS=(/usr/lib/vst3)
+  build_command fake-daw
+
+  assert_sequence --ro-bind /usr /usr
+  refute_sequence --bind /usr/lib/vst3 /usr/lib/vst3
+  assert_read_only /usr/lib/vst3
+}
+
+@test "command construction refuses a native plugin path it was handed late" {
+  load_sandbox
+  configure_sandbox
+  SANDBOX_NATIVE_PLUGIN_PATHS=("$PRODUCTION_HOME/.vst/yabridge")
+
+  run build_command fake-daw
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"--native-plugin-path"* ]]
+}
+
+@test "input preflight refuses a native plugin path at the filesystem root" {
+  load_sandbox
+  configure_sandbox
+  resolve_daw_executable fake-daw
+  SANDBOX_NATIVE_PLUGIN_PATHS=(/)
+
+  run assert_sandbox_inputs
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"--native-plugin-path"* ]]
+}
+
+# ── The source prefix may not live in project state ──────────────────────────
+
+@test "input preflight refuses a source prefix inside the project tree" {
+  load_sandbox
+  configure_sandbox
+  resolve_daw_executable fake-daw
+
+  local nested
+  for nested in "$FIXTURE_ROOT/nested-prefix" "$COPY" "$ISOLATION/prefix"; do
+    SANDBOX_REAL_PREFIX="$nested"
+    run assert_sandbox_inputs
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"source prefix"* ]]
+  done
+}
+
+@test "launcher refuses a source prefix inside the project tree before cloning" {
+  make_prefix "$FIXTURE_ROOT/nested-prefix"
+
+  run_daw_fixture --prefix "$FIXTURE_ROOT/nested-prefix" fake-daw
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"source prefix"* ]]
+  refute_launcher_mutation
+}
+
 # ── Narrow runtime, display and audio exposure ───────────────────────────────
 
 @test "sandbox provides an isolated runtime directory without the host one" {
@@ -1243,6 +1384,60 @@ $BATS_TEST_TMPDIR"
   refute_launcher_mutation
 }
 
+@test "launcher refuses a shadowing native plugin path before cloning" {
+  run_daw_fixture --prefix "$REAL_PREFIX" --native-plugin-path / fake-daw
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"--native-plugin-path"* ]]
+  refute_launcher_mutation
+}
+
+@test "launcher refuses a native plugin path at the real home before cloning" {
+  run_daw_fixture --prefix "$REAL_PREFIX" \
+    --native-plugin-path "$PRODUCTION_HOME" fake-daw
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"real home"* ]]
+  refute_launcher_mutation
+}
+
+@test "launcher refuses a production yabridge native plugin path before cloning" {
+  run_daw_fixture --prefix "$REAL_PREFIX" \
+    --native-plugin-path "$PRODUCTION_HOME/.vst/yabridge" fake-daw
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"protected"* ]]
+  refute_launcher_mutation
+}
+
+@test "launcher refuses a symlinked production plugin alias before cloning" {
+  local target="$BATS_TEST_TMPDIR/external-vst"
+  alias_plugin_root .vst "$target"
+
+  run_daw_fixture --prefix "$REAL_PREFIX" \
+    --native-plugin-path "$PRODUCTION_HOME/.vst/yabridge" fake-daw
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"canonical"* ]]
+  refute_launcher_mutation
+
+  run_daw_fixture --prefix "$REAL_PREFIX" \
+    --native-plugin-path "$target/yabridge" fake-daw
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"protected"* ]]
+  refute_launcher_mutation
+}
+
+@test "launcher accepts a narrow system native plugin path" {
+  [ -d /usr/lib/vst3 ] || skip "no system VST3 directory at /usr/lib/vst3"
+
+  run_daw_fixture --prefix "$REAL_PREFIX" \
+    --native-plugin-path /usr/lib/vst3 fake-daw
+
+  [ "$status" -eq 0 ]
+  [ "$(daw_env_value VST3_PATH)" = \
+    "$ISOLATED_HOME/.vst3/yabridge:/usr/lib/vst3" ]
+}
+
 @test "launcher rejects a missing writable path value" {
   run_daw_fixture --prefix "$REAL_PREFIX" --writable-path
 
@@ -1451,4 +1646,63 @@ EOF
   run "$FIXTURE_ROOT/daw-env.sh" --prefix "$REAL_PREFIX" suicidal-daw
 
   [ "$status" -eq 143 ]
+}
+
+# The record of what a run was is worth only as much as the DAW's inability to
+# edit it. It lives under the read-only project root rather than in the
+# writable isolation tree, so this proves the kernel refuses every way in:
+# rewriting it, truncating it, unlinking it, and replacing its directory entry.
+@test "a sandboxed DAW cannot rewrite or delete the run manifest" {
+  require_live_sandbox
+
+  local manifest="$FIXTURE_ROOT/run-state/run-manifest.json"
+  local report="$PROJECTS/report"
+  cat > "$FIXTURE_BIN/tampering-daw" <<EOF
+#!/bin/bash
+{
+  printf 'checksum=%s\n' "\$(sha256sum < "$manifest")"
+  if printf 'forged' > "$manifest" 2>/dev/null; then
+    printf 'overwrite=succeeded\n'
+  else
+    printf 'overwrite=failed\n'
+  fi
+  if printf 'appended' >> "$manifest" 2>/dev/null; then
+    printf 'append=succeeded\n'
+  else
+    printf 'append=failed\n'
+  fi
+  if rm -f -- "$manifest" 2>/dev/null && [[ ! -e "$manifest" ]]; then
+    printf 'delete=succeeded\n'
+  else
+    printf 'delete=failed\n'
+  fi
+  if printf 'forged' > "$FIXTURE_ROOT/run-state/other.json" 2>/dev/null; then
+    printf 'create=succeeded\n'
+  else
+    printf 'create=failed\n'
+  fi
+  printf 'readable=%s\n' "\$(head -c 1 -- "$manifest")"
+} > "$report"
+EOF
+  chmod +x "$FIXTURE_BIN/tampering-daw"
+
+  run "$FIXTURE_ROOT/daw-env.sh" --prefix "$REAL_PREFIX" \
+    --writable-path "$PROJECTS" tampering-daw
+
+  [ "$status" -eq 0 ]
+  [ -f "$report" ]
+  grep -Fxq 'overwrite=failed' "$report"
+  grep -Fxq 'append=failed' "$report"
+  grep -Fxq 'delete=failed' "$report"
+  grep -Fxq 'create=failed' "$report"
+  grep -Fxq 'readable={' "$report"
+  [ -f "$manifest" ]
+  [ ! -e "$FIXTURE_ROOT/run-state/other.json" ]
+  # The checksum the DAW saw before it started trying is still the checksum on
+  # disk now that it has stopped.
+  local observed
+  observed="$(sed -n 's/^checksum=//p' "$report")"
+  [ -n "$observed" ]
+  [ "$(sha256sum < "$manifest")" = "$observed" ]
+  python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$manifest"
 }

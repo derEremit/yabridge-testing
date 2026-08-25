@@ -21,6 +21,10 @@ ISOLATED_BRIDGE_HOME=""
 ISOLATED_BRIDGE_TARGET_COUNT=0
 ISOLATED_BRIDGE_ACTIVE_IDENTITY=""
 OWNED_BRIDGE_CANDIDATE=""
+# The scan listing below is removed on every path the function itself takes. A
+# signal arriving mid-traversal takes none of them, so the name is published
+# here for the launcher's trap to finish the job.
+OWNED_BRIDGE_SCAN_LISTING=""
 
 isolated_bridges_error() {
     echo "Error: $*" >&2
@@ -76,6 +80,17 @@ cleanup_owned_bridge_candidate() {
         rm -rf -- "$OWNED_BRIDGE_CANDIDATE"
     fi
     OWNED_BRIDGE_CANDIDATE=""
+}
+
+# Only ever removes the listing this invocation created, under the name it was
+# created with, so a concurrent launcher's listing is never touched.
+cleanup_owned_bridge_scan_listing() {
+    if [[ -n "$OWNED_BRIDGE_SCAN_LISTING" &&
+        ! -L "$OWNED_BRIDGE_SCAN_LISTING" &&
+        -f "$OWNED_BRIDGE_SCAN_LISTING" ]]; then
+        rm -f -- "$OWNED_BRIDGE_SCAN_LISTING"
+    fi
+    OWNED_BRIDGE_SCAN_LISTING=""
 }
 
 # Windows plugin references are the only bridge entries that may point into the
@@ -157,19 +172,20 @@ scan_isolated_bridge_root() {
         isolated_bridges_error "could not create a temporary bridge listing for $root"
         return 1
     fi
+    OWNED_BRIDGE_SCAN_LISTING="$listing"
     find "$root" -mindepth 1 -print0 > "$listing" || find_status=$?
     if [[ "$find_status" -ne 0 ]]; then
-        rm -f -- "$listing"
+        cleanup_owned_bridge_scan_listing
         isolated_bridges_error "could not traverse the isolated bridge root: $root"
         return 1
     fi
     if ! mapfile -d '' -t ISOLATED_BRIDGE_SCAN_ENTRIES < "$listing"; then
-        rm -f -- "$listing"
+        cleanup_owned_bridge_scan_listing
         ISOLATED_BRIDGE_SCAN_ENTRIES=()
         isolated_bridges_error "could not read the isolated bridge listing for $root"
         return 1
     fi
-    rm -f -- "$listing"
+    cleanup_owned_bridge_scan_listing
 }
 
 validate_bridge_targets() {

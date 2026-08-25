@@ -39,6 +39,9 @@ RUN_MANIFEST_BRIDGE_RELATIVE_ROOTS=(".vst/yabridge" ".vst3/yabridge" ".clap/yabr
 # things.
 RUN_MANIFEST_WINE_VERSION_PATTERN='^[A-Za-z0-9][A-Za-z0-9._+-]*$'
 RUN_MANIFEST_WINE_SHA256_PATTERN='^[0-9a-fA-F]{64}$'
+# The one component field that is a claim rather than a shape: setup writes it
+# only after comparing a downloaded archive against a digest the user supplied.
+RUN_MANIFEST_WINE_VERIFIED_KEY="WINE_SHA256_VERIFIED"
 RUN_MANIFEST_YABRIDGE_REF_PATTERN='^[A-Za-z0-9][A-Za-z0-9._/+@-]*$'
 RUN_MANIFEST_YABRIDGE_COMMIT_PATTERN='^[0-9a-fA-F]{40}$'
 
@@ -355,6 +358,25 @@ run_manifest_state_value() {
     printf '%s\n' "$value"
 }
 
+# A recorded digest says which bytes were installed; it does not say that
+# anybody compared them against a digest they chose. Only setup.sh writes this
+# key, and only after `sha256sum -c` accepted the archive, so requiring it here
+# is what stops a self-hashed or hand-edited record from being published as a
+# verified one.
+run_manifest_verified_digest() {
+    local file="$1"
+    local value=""
+
+    value="$(read_state "$RUN_MANIFEST_WINE_VERIFIED_KEY" "$file")" || value=""
+    if [[ "$value" != true ]]; then
+        run_manifest_error "component state does not record ${RUN_MANIFEST_WINE_VERIFIED_KEY}=true: $file"
+        echo "The installed Wine was never checked against a digest you chose." >&2
+        echo "Reinstall it with a digest you trust:" >&2
+        echo "  ./setup.sh --wine-version <version> --wine-sha256 <digest>" >&2
+        return 1
+    fi
+}
+
 # What the Wine executable says it is, compared against the version setup.sh
 # recorded. A Wine binary swapped after installation answers differently, and
 # the run is refused rather than recorded under the wrong identity.
@@ -538,6 +560,7 @@ assert_recorded_components() {
         "$RUN_MANIFEST_WINE_VERSION_PATTERN" "$state" > /dev/null || return 1
     run_manifest_state_value WINE_SHA256 \
         "$RUN_MANIFEST_WINE_SHA256_PATTERN" "$state" > /dev/null || return 1
+    run_manifest_verified_digest "$state" || return 1
     run_manifest_state_value YABRIDGE_REF \
         "$RUN_MANIFEST_YABRIDGE_REF_PATTERN" "$state" > /dev/null || return 1
     run_manifest_state_value YABRIDGE_COMMIT \
@@ -629,6 +652,7 @@ write_run_manifest() {
         "$RUN_MANIFEST_WINE_VERSION_PATTERN" "$__run_manifest_state")" || return 1
     __run_manifest_wine_digest="$(run_manifest_state_value WINE_SHA256 \
         "$RUN_MANIFEST_WINE_SHA256_PATTERN" "$__run_manifest_state")" || return 1
+    run_manifest_verified_digest "$__run_manifest_state" || return 1
     __run_manifest_yabridge_ref="$(run_manifest_state_value YABRIDGE_REF \
         "$RUN_MANIFEST_YABRIDGE_REF_PATTERN" "$__run_manifest_state")" || return 1
     __run_manifest_yabridge_commit="$(run_manifest_state_value \
@@ -717,6 +741,7 @@ run_manifest_encode() {
         "RUN_MANIFEST_JSON_WINE_REQUESTED_VERSION=$wine_version" \
         "RUN_MANIFEST_JSON_WINE_INSTALLED_VERSION=$RUN_MANIFEST_WINE_INSTALLED_VERSION" \
         "RUN_MANIFEST_JSON_WINE_SHA256=$wine_digest" \
+        "RUN_MANIFEST_JSON_WINE_DIGEST_VERIFIED=true" \
         "RUN_MANIFEST_JSON_WINE_EXECUTABLE=$wine" \
         "RUN_MANIFEST_JSON_WINE_VERSION_STRING=$RUN_MANIFEST_WINE_VERSION_STRING" \
         "RUN_MANIFEST_JSON_YABRIDGE_REQUESTED_REF=$yabridge_ref" \
@@ -778,6 +803,7 @@ document = {
     "wine_requested_version": text("WINE_REQUESTED_VERSION"),
     "wine_installed_version": text("WINE_INSTALLED_VERSION"),
     "wine_sha256": text("WINE_SHA256"),
+    "wine_digest_verified": boolean("WINE_DIGEST_VERIFIED"),
     "wine_executable": text("WINE_EXECUTABLE"),
     "wine_version_string": text("WINE_VERSION_STRING"),
     "yabridge_requested_ref": text("YABRIDGE_REQUESTED_REF"),
