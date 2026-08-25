@@ -16,8 +16,10 @@ setup() {
   DAW_ENV_FILE="$BATS_TEST_TMPDIR/daw-env.out"
   ISOLATION="$FIXTURE_ROOT/isolation"
   ISOLATED_HOME="$ISOLATION/home"
+  PRODUCTION_HOME="$BATS_TEST_TMPDIR/production-home"
 
-  mkdir -p "$FIXTURE_ROOT/lib" "$FIXTURE_BIN" "$YABRIDGE_HOME" "$OUTSIDE"
+  mkdir -p "$FIXTURE_ROOT/lib" "$FIXTURE_BIN" "$YABRIDGE_HOME" "$OUTSIDE" \
+    "$PRODUCTION_HOME"
   printf '%s\n' 'evil' > "$OUTSIDE/Evil.dll"
   printf '%s\n' 'evil' > "$OUTSIDE/Evil.clap"
   mkdir -p "$OUTSIDE/Evil.vst3"
@@ -26,7 +28,7 @@ setup() {
 
   cp "$PROJECT_ROOT/daw-env.sh" "$FIXTURE_ROOT/daw-env.sh"
   chmod +x "$FIXTURE_ROOT/daw-env.sh"
-  for helper in clone-state.sh isolated-bridges.sh; do
+  for helper in clone-state.sh isolated-bridges.sh sandbox.sh; do
     if [[ -f "$PROJECT_ROOT/lib/$helper" ]]; then
       cp "$PROJECT_ROOT/lib/$helper" "$FIXTURE_ROOT/lib/$helper"
     fi
@@ -89,6 +91,14 @@ fi
 EOF
   chmod +x "$FIXTURE_BIN/fake-daw" "$FIXTURE_BIN/wine" \
     "$FIXTURE_BIN/wineserver" "$FIXTURE_BIN/cp" "$FAKE_YABRIDGECTL"
+
+  # Bridge generation is what this suite covers, so the sandbox is stubbed: the
+  # fake bwrap records its argv, applies the environment it was told to set, and
+  # runs the command it was given. Real Bubblewrap enforcement is covered by
+  # tests/sandbox.bats.
+  write_fake_bwrap "$FIXTURE_BIN/bwrap"
+  export SANDBOX_TEST_BWRAP_CALLS="$BATS_TEST_TMPDIR/bwrap.calls"
+  export HOME="$PRODUCTION_HOME"
 
   export TMPDIR="$BATS_TEST_TMPDIR/tmp"
   mkdir -p "$TMPDIR"

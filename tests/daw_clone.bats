@@ -11,9 +11,12 @@ setup() {
 
   YABRIDGE_HOME="$FIXTURE_ROOT/build/yabridge"
 
-  mkdir -p "$FIXTURE_ROOT/lib" "$FIXTURE_BIN" "$YABRIDGE_HOME"
+  PRODUCTION_HOME="$BATS_TEST_TMPDIR/production-home"
+
+  mkdir -p "$FIXTURE_ROOT/lib" "$FIXTURE_BIN" "$YABRIDGE_HOME" \
+    "$PRODUCTION_HOME"
   cp "$PROJECT_ROOT/daw-env.sh" "$FIXTURE_ROOT/daw-env.sh"
-  for helper in clone-state.sh isolated-bridges.sh; do
+  for helper in clone-state.sh isolated-bridges.sh sandbox.sh; do
     if [[ -f "$PROJECT_ROOT/lib/$helper" ]]; then
       cp "$PROJECT_ROOT/lib/$helper" "$FIXTURE_ROOT/lib/$helper"
     fi
@@ -81,8 +84,15 @@ EOF
   chmod +x "$FIXTURE_ROOT/daw-env.sh" "$FIXTURE_BIN/fake-daw" \
     "$FIXTURE_BIN/wine" "$FIXTURE_BIN/wineserver" "$FIXTURE_BIN/cp"
 
+  # Clone provenance is what this suite covers, so the sandbox is stubbed: the
+  # fake bwrap records its argv and runs the command it was given. Real
+  # Bubblewrap enforcement is covered by tests/sandbox.bats.
+  write_fake_bwrap "$FIXTURE_BIN/bwrap"
+
   export DAW_TEST_CP_CALLS="$CALLS"
   export PATH="$FIXTURE_BIN:$PATH"
+  export SANDBOX_TEST_BWRAP_CALLS="$BATS_TEST_TMPDIR/bwrap.calls"
+  export HOME="$PRODUCTION_HOME"
   make_prefix "$SOURCE"
 }
 

@@ -22,6 +22,12 @@
 #     generated Windows target must canonicalize inside prefix-copy/. Your
 #     production yabridgectl configuration and bridge directories are never
 #     read, written, or exposed to the DAW.
+#   - The DAW runs inside Bubblewrap. Your real prefix, your production plugin
+#     roots and the project tree are mounted READ-ONLY; only the clone, the
+#     isolation tree and the paths you approve with --writable-path are
+#     writable. The sandbox gets a fresh network namespace unless you pass
+#     --network. If Bubblewrap or the namespaces it needs are unavailable the
+#     launcher refuses to start the DAW.
 #
 # The clone persists between runs (so the one-time wine upgrade isn't repeated
 # and plugin state survives). Use --fresh to re-clone, --clean to delete it.
@@ -30,6 +36,7 @@
 #   - /home on btrfs (or any FS with reflink). Verified: yes.
 #   - ./setup.sh run at least once (builds yabridge, downloads wine 11.8).
 #   - DAW installed natively (not flatpak/snap).
+#   - bubblewrap 0.11+ and a kernel that permits its namespaces.
 #
 # Usage:
 #   ./daw-env.sh reaper
@@ -46,6 +53,17 @@
 #                              Repeatable. Nothing else is inherited.
 #   --allow-empty              launch even when no bridges were generated.
 #                              Fixtures and diagnostics only.
+#
+# Sandbox options:
+#   --writable-path DIR        make one existing, canonical, absolute directory
+#                              writable inside the sandbox, for projects and
+#                              rendered output. Repeatable. Rejected when it
+#                              overlaps the production prefix, a production
+#                              plugin root, a system root, the project tree,
+#                              the clone or the isolation tree.
+#   --network                  give the DAW host network access. Off by
+#                              default: the sandbox gets its own empty network
+#                              namespace.
 
 set -euo pipefail
 
@@ -58,9 +76,12 @@ CLEAN=false
 REFRESH_BRIDGES=false
 ALLOW_EMPTY=false
 NATIVE_PLUGIN_PATHS=()
+REQUESTED_WRITABLE_PATHS=()
+LAUNCH_COMMAND=()
 
 source "$ROOT/lib/clone-state.sh"
 source "$ROOT/lib/isolated-bridges.sh"
+source "$ROOT/lib/sandbox.sh"
 
 daw_env_cleanup() {
     local status=$?
@@ -96,9 +117,15 @@ while [[ $# -gt 0 ]]; do
             NATIVE_PLUGIN_PATHS+=("$2")
             shift 2
             ;;
+        --network) SANDBOX_NETWORK=true; shift ;;
+        --writable-path)
+            require_option_value "--writable-path" "${2:-}"
+            REQUESTED_WRITABLE_PATHS+=("$2")
+            shift 2
+            ;;
         --clean)   CLEAN=true; shift ;;
         -h|--help)
-            sed -n '2,48p' "$0" | sed 's/^# \?//'
+            sed -n '2,66p' "$0" | sed 's/^# \?//'
             exit 0 ;;
         --) shift; break ;;
         -*) echo "Unknown option: $1" >&2; exit 1 ;;
@@ -109,19 +136,14 @@ export YABRIDGE_STAGING_REFRESH_BRIDGES="$REFRESH_BRIDGES"
 
 DAW="${1:-}"
 if [[ "$CLEAN" != true && -z "$DAW" ]]; then
-    echo "Usage: $0 [--fresh] [--refresh-bridges] [--allow-empty]"
-    echo "          [--native-plugin-path DIR]... [--prefix DIR]"
-    echo "          <daw-binary> [args...]"
+    echo "Usage: $0 [--fresh] [--refresh-bridges] [--allow-empty] [--network]"
+    echo "          [--native-plugin-path DIR]... [--writable-path DIR]..."
+    echo "          [--prefix DIR] <daw-binary> [args...]"
     echo "       $0 --clean"
     exit 1
 fi
 if [[ "$CLEAN" != true ]]; then
     shift 1
-fi
-
-if [[ "$CLEAN" != true ]] && ! command -v "$DAW" &>/dev/null; then
-    echo "Error: '$DAW' not found in PATH" >&2
-    exit 1
 fi
 
 # ── Resolve the real prefix (collapses ~/winplugins -> .audio-production/...) ─
@@ -137,6 +159,24 @@ fi
 if [[ ! -f "$REAL_PREFIX/system.reg" ]]; then
     echo "Error: $REAL_PREFIX does not look like a Wine prefix (no system.reg)" >&2
     exit 1
+fi
+
+# ── Prove the sandbox boundary before touching or generating anything ────────
+# The DAW is resolved, Bubblewrap is required and its namespaces are probed
+# before the prefix is cloned and before yabridgectl runs. A host that cannot
+# enforce the boundary therefore never reaches a DAW, a clone or a bridge sync.
+SANDBOX_PROJECT_ROOT="$ROOT"
+SANDBOX_REAL_PREFIX="$REAL_PREFIX"
+SANDBOX_CLONE="$COPY"
+SANDBOX_ISOLATION="$ROOT/isolation"
+if [[ "$CLEAN" != true ]]; then
+    resolve_daw_executable "$DAW" || exit 1
+    require_bwrap || exit 1
+    assert_sandbox_namespaces || exit 1
+    for requested in ${REQUESTED_WRITABLE_PATHS[@]+"${REQUESTED_WRITABLE_PATHS[@]}"}; do
+        validate_writable_path "$requested" || exit 2
+        SANDBOX_WRITABLE_PATHS+=("$requested")
+    done
 fi
 
 # ── Clone the real prefix (reflink / copy-on-write) ──────────────────────────
@@ -213,7 +253,10 @@ if [[ ! -x "$YABRIDGECTL" ]] && ! YABRIDGECTL="$(command -v yabridgectl)"; then
     exit 1
 fi
 
+# Both are read by lib/isolated-bridges.sh.
+# shellcheck disable=SC2034
 ISOLATED_BRIDGES_REFRESH="$REFRESH_BRIDGES"
+# shellcheck disable=SC2034
 ISOLATED_BRIDGES_ALLOW_EMPTY="$ALLOW_EMPTY"
 prepare_isolated_bridges "$ROOT" "$COPY" "$YABRIDGECTL" "$YABRIDGE_HOME"
 export_isolated_plugin_paths ${NATIVE_PLUGIN_PATHS[@]+"${NATIVE_PLUGIN_PATHS[@]}"}
@@ -221,7 +264,19 @@ export_isolated_plugin_paths ${NATIVE_PLUGIN_PATHS[@]+"${NATIVE_PLUGIN_PATHS[@]}
 release_clone_lock
 trap - EXIT INT TERM
 
+# ── Build the sandbox command ────────────────────────────────────────────────
+# The command is an argv array, so every DAW argument reaches the DAW exactly
+# as it was given.
+SANDBOX_ISOLATED_HOME="$ISOLATED_BRIDGE_HOME"
+SANDBOX_NATIVE_PLUGIN_PATHS=(${NATIVE_PLUGIN_PATHS[@]+"${NATIVE_PLUGIN_PATHS[@]}"})
+build_bwrap_command LAUNCH_COMMAND "$DAW" "$@" || exit 1
+
 # ── Launch ───────────────────────────────────────────────────────────────────
+if [[ "$SANDBOX_NETWORK" == true ]]; then
+    network_status="host network (--network)"
+else
+    network_status="isolated (no network namespace access)"
+fi
 echo ""
 echo "Launching $DAW with:"
 echo "  WINELOADER:  $WINELOADER ($(wine --version 2>/dev/null || echo '?'))"
@@ -230,8 +285,11 @@ echo "  WINEPREFIX:  $WINEPREFIX  (COW clone of $REAL_PREFIX)"
 echo "  VST_PATH:    $VST_PATH"
 echo "  VST3_PATH:   $VST3_PATH"
 echo "  CLAP_PATH:   $CLAP_PATH"
-echo "  Original prefix is read-only-shared via COW — physically never modified."
+echo "  sandbox:     $SANDBOX_BWRAP (user namespace: $SANDBOX_UNSHARE_USER)"
+echo "  network:     $network_status"
+echo "  writable:    $COPY, $SANDBOX_ISOLATION${SANDBOX_WRITABLE_PATHS[*]+, ${SANDBOX_WRITABLE_PATHS[*]}}"
+echo "  Production prefix and plugin roots are mounted read-only."
 echo "  Bridges resolve only inside the clone; production bridges are not used."
 echo ""
 
-exec "$DAW" "$@"
+exec "${LAUNCH_COMMAND[@]}"
