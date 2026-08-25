@@ -9,19 +9,36 @@ setup() {
   CALLS="$BATS_TEST_TMPDIR/cp.calls"
   DAW_PREFIX="$BATS_TEST_TMPDIR/daw-prefix"
 
-  mkdir -p "$FIXTURE_ROOT/lib" "$FIXTURE_BIN"
+  YABRIDGE_HOME="$FIXTURE_ROOT/build/yabridge"
+
+  mkdir -p "$FIXTURE_ROOT/lib" "$FIXTURE_BIN" "$YABRIDGE_HOME"
   cp "$PROJECT_ROOT/daw-env.sh" "$FIXTURE_ROOT/daw-env.sh"
-  if [[ -f "$PROJECT_ROOT/lib/clone-state.sh" ]]; then
-    cp "$PROJECT_ROOT/lib/clone-state.sh" "$FIXTURE_ROOT/lib/clone-state.sh"
-  fi
+  for helper in clone-state.sh isolated-bridges.sh; do
+    if [[ -f "$PROJECT_ROOT/lib/$helper" ]]; then
+      cp "$PROJECT_ROOT/lib/$helper" "$FIXTURE_ROOT/lib/$helper"
+    fi
+  done
 
   cat > "$FIXTURE_ROOT/env.sh" <<EOF
 export WINELOADER="$FIXTURE_BIN/wine"
 export WINESERVER="$FIXTURE_BIN/wineserver"
 export WINEDLLPATH="$BATS_TEST_TMPDIR/winedll"
+export YABRIDGE_BIN="$YABRIDGE_HOME"
 export PATH="$FIXTURE_BIN:\$PATH"
 export LD_LIBRARY_PATH="$BATS_TEST_TMPDIR/lib"
 EOF
+
+  cat > "$YABRIDGE_HOME/yabridgectl" <<'EOF'
+#!/bin/bash
+set -euo pipefail
+if [[ "${1:-}" == sync ]]; then
+  mkdir -p "$HOME/.vst/yabridge"
+  printf '%s\n' 'native' > "$HOME/.vst/yabridge/Good.so"
+  ln -s "$DAW_TEST_CLONE/Good.dll" "$HOME/.vst/yabridge/Good.dll"
+fi
+EOF
+  chmod +x "$YABRIDGE_HOME/yabridgectl"
+  export DAW_TEST_CLONE="$FIXTURE_ROOT/prefix-copy"
 
   cat > "$FIXTURE_BIN/fake-daw" <<EOF
 #!/bin/bash
@@ -74,6 +91,7 @@ make_prefix() {
   mkdir -p "$path"
   printf '%s\n' 'WINE REGISTRY Version 2' > "$path/system.reg"
   printf '%s\n' 'source data' > "$path/source-sentinel"
+  printf '%s\n' 'plugin' > "$path/Good.dll"
 }
 
 run_daw_fixture() {

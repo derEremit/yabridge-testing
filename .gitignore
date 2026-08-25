@@ -6,6 +6,10 @@ prefix/
 prefix-copy/
 prefix-copy.new.*
 
+# Isolated HOME/XDG tree holding generated yabridge bridges
+isolation/
+isolation.new.*
+
 # Generated environment (absolute paths)
 env.sh
 test.sh
