@@ -398,6 +398,119 @@ sync_call_count() {
   done
 }
 
+# A production plugin root is often a symlink to storage elsewhere. Skipping it
+# would leave those bridges outside every boundary the launcher enforces, and
+# protecting only the lexical `$HOME/.vst` name would let `--writable-path`
+# reach the same directory under its canonical name.
+alias_plugin_root() {
+  local name="$1"
+  local target="$2"
+  mkdir -p "$target/yabridge"
+  printf '%s\n' 'production bridge' > "$target/yabridge/Production.so"
+  rm -rf "$PRODUCTION_HOME/$name"
+  ln -s "$target" "$PRODUCTION_HOME/$name"
+}
+
+@test "sandbox exposes the canonical target of a symlinked plugin root read-only" {
+  load_sandbox
+  local target="$BATS_TEST_TMPDIR/external-vst"
+  alias_plugin_root .vst "$target"
+  configure_sandbox
+
+  build_command fake-daw
+
+  assert_sequence --ro-bind "$target" "$target"
+  refute_sequence --bind "$target" "$target"
+  assert_read_only "$target"
+  assert_read_only "$target/yabridge/Production.so"
+}
+
+@test "writable paths reject the canonical target of a symlinked plugin root" {
+  load_sandbox
+  local target="$BATS_TEST_TMPDIR/external-vst"
+  alias_plugin_root .vst "$target"
+  configure_sandbox
+
+  run validate_writable_path "$target"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"protected"* ]]
+
+  run validate_writable_path "$target/yabridge"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"protected"* ]]
+
+  # The alias itself is refused too, by the earlier and more precise canonical
+  # path check rather than by the overlap check.
+  run validate_writable_path "$PRODUCTION_HOME/.vst"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"canonical"* ]]
+}
+
+@test "sandbox refuses a plugin root alias that does not resolve" {
+  load_sandbox
+  rm -rf "$PRODUCTION_HOME/.vst"
+  ln -s "$BATS_TEST_TMPDIR/absent-vst" "$PRODUCTION_HOME/.vst"
+  configure_sandbox
+
+  run build_command fake-daw
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"plugin root"* ]]
+}
+
+@test "sandbox refuses a plugin root alias that is not a directory" {
+  load_sandbox
+  printf '%s\n' 'not a plugin root' > "$BATS_TEST_TMPDIR/vst-file"
+  rm -rf "$PRODUCTION_HOME/.vst"
+  ln -s "$BATS_TEST_TMPDIR/vst-file" "$PRODUCTION_HOME/.vst"
+  configure_sandbox
+
+  run build_command fake-daw
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"plugin root"* ]]
+}
+
+@test "sandbox refuses a plugin root alias that widens to the real home" {
+  load_sandbox
+  rm -rf "$PRODUCTION_HOME/.vst"
+  ln -s "$PRODUCTION_HOME" "$PRODUCTION_HOME/.vst"
+  configure_sandbox
+
+  run build_command fake-daw
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"plugin root"* ]]
+  [[ "$output" == *"home"* ]]
+}
+
+@test "sandbox refuses a plugin root alias that widens above the real home" {
+  load_sandbox
+  rm -rf "$PRODUCTION_HOME/.vst3"
+  ln -s "$BATS_TEST_TMPDIR" "$PRODUCTION_HOME/.vst3"
+  configure_sandbox
+
+  run build_command fake-daw
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"plugin root"* ]]
+}
+
+@test "sandbox exposes two plugin roots sharing one target exactly once" {
+  load_sandbox
+  local target="$BATS_TEST_TMPDIR/shared-plugins"
+  alias_plugin_root .vst "$target"
+  alias_plugin_root .vst3 "$target"
+  configure_sandbox
+
+  build_command fake-daw
+
+  assert_sequence --ro-bind "$target" "$target"
+  assert_read_only "$target/yabridge/Production.so"
+  [ "$(printf '%s\n' ${SANDBOX_COMMAND[@]+"${SANDBOX_COMMAND[@]}"} |
+    grep -cFx "$target")" -eq 2 ]
+}
+
 @test "sandbox never binds the production home" {
   load_sandbox
   configure_sandbox
@@ -484,6 +597,126 @@ sync_call_count() {
   assert_sequence --ro-bind "$PRODUCTION_HOME/bin" "$PRODUCTION_HOME/bin"
   refute_sequence --ro-bind "$PRODUCTION_HOME" "$PRODUCTION_HOME"
   refute_exposed_source "$PRODUCTION_HOME/private-notes"
+}
+
+@test "sandbox refuses a DAW install root at the filesystem root" {
+  load_sandbox
+  configure_sandbox
+
+  run sandbox_daw_install_root /studio
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"install root"* ]]
+}
+
+@test "sandbox refuses a DAW installed directly in the real home" {
+  load_sandbox
+  configure_sandbox
+  cp "$FIXTURE_BIN/fake-daw" "$PRODUCTION_HOME/studio"
+  chmod +x "$PRODUCTION_HOME/studio"
+
+  run build_command "$PRODUCTION_HOME/studio"
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"install root"* ]]
+  [[ "$output" == *"home"* ]]
+}
+
+@test "sandbox refuses a DAW install root above the real home" {
+  load_sandbox
+  configure_sandbox
+  cp "$FIXTURE_BIN/fake-daw" "$BATS_TEST_TMPDIR/studio"
+  chmod +x "$BATS_TEST_TMPDIR/studio"
+
+  run build_command "$BATS_TEST_TMPDIR/studio"
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"install root"* ]]
+}
+
+# ── One resolved DAW across preflight and construction ───────────────────────
+
+@test "command construction reuses the executable the preflight resolved" {
+  load_sandbox
+  configure_sandbox
+  resolve_daw_executable fake-daw
+  [ "$SANDBOX_DAW_PATH" = "$FIXTURE_BIN/fake-daw" ]
+
+  build_command "$SANDBOX_DAW_PATH"
+
+  assert_sequence -- "$FIXTURE_BIN/fake-daw"
+  [ "$SANDBOX_DAW_PATH" = "$FIXTURE_BIN/fake-daw" ]
+}
+
+@test "command construction refuses a DAW that resolves elsewhere after the preflight" {
+  load_sandbox
+  configure_sandbox
+  resolve_daw_executable fake-daw
+  local resolved="$SANDBOX_DAW_PATH"
+  mkdir -p "$BATS_TEST_TMPDIR/shadow-bin"
+  cp "$FIXTURE_BIN/fake-daw" "$BATS_TEST_TMPDIR/shadow-bin/fake-daw"
+  chmod +x "$BATS_TEST_TMPDIR/shadow-bin/fake-daw"
+
+  PATH="$BATS_TEST_TMPDIR/shadow-bin:$PATH" run build_command fake-daw
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"preflight"* ]]
+  [ "$SANDBOX_DAW_PATH" = "$resolved" ]
+}
+
+@test "command construction refuses a DAW removed after the preflight" {
+  load_sandbox
+  configure_sandbox
+  resolve_daw_executable fake-daw
+  rm -f "$FIXTURE_BIN/fake-daw"
+
+  run build_command fake-daw
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"not found"* ]]
+}
+
+# ── Mount plan conflicts ─────────────────────────────────────────────────────
+
+@test "sandbox rejects a duplicate mount destination" {
+  load_sandbox
+  configure_sandbox
+  SANDBOX_MOUNT_DESTINATIONS=()
+  sandbox_register_destination "$PROJECTS"
+
+  run sandbox_register_destination "$PROJECTS"
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"duplicate"* ]]
+}
+
+@test "sandbox rejects a writable mount that would shadow a narrower one" {
+  load_sandbox
+  configure_sandbox
+  mkdir -p "$PROJECTS/inner"
+  SANDBOX_MOUNT_DESTINATIONS=()
+  SANDBOX_MOUNT_ARGUMENTS=()
+  SANDBOX_MOUNT_PASSTHROUGH=()
+  sandbox_add_mount --ro-bind "$PROJECTS/inner" "$PROJECTS/inner"
+
+  run sandbox_add_writable_mount "$PROJECTS"
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"shadow"* ]]
+}
+
+# Validation rejects an overlapping writable path first, so this proves the
+# second, independent layer: even an unvalidated request cannot shadow the
+# mounts the sandbox already decided on.
+@test "sandbox refuses to build when a writable path shadows the project root" {
+  load_sandbox
+  configure_sandbox
+  SANDBOX_WRITABLE_PATHS=("$FIXTURE_ROOT")
+
+  run build_command fake-daw
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"shadow"* ]]
 }
 
 # ── Network isolation ────────────────────────────────────────────────────────
@@ -794,6 +1027,27 @@ $BATS_TEST_TMPDIR"
   [[ "$(launched_argv)" != *" --unshare-net "* ]]
 }
 
+# Host networking is a decision, not an inherited default. A stale export in
+# the launching shell must not be able to make it for the user.
+@test "launcher ignores an inherited SANDBOX_NETWORK request" {
+  export SANDBOX_NETWORK=true
+
+  run_daw_fixture --prefix "$REAL_PREFIX" fake-daw
+
+  [ "$status" -eq 0 ]
+  [[ "$(launched_argv)" == *" --unshare-net "* ]]
+  [[ "$output" == *"network:     isolated"* ]]
+}
+
+@test "launcher still shares the network when SANDBOX_NETWORK is inherited false" {
+  export SANDBOX_NETWORK=false
+
+  run_daw_fixture --network --prefix "$REAL_PREFIX" fake-daw
+
+  [ "$status" -eq 0 ]
+  [[ "$(launched_argv)" != *" --unshare-net "* ]]
+}
+
 @test "launcher binds explicit writable paths and nothing else" {
   run_daw_fixture --prefix "$REAL_PREFIX" --writable-path "$PROJECTS" fake-daw
 
@@ -804,6 +1058,19 @@ $BATS_TEST_TMPDIR"
 @test "launcher rejects a writable path that overlaps production state" {
   run_daw_fixture --prefix "$REAL_PREFIX" \
     --writable-path "$PRODUCTION_HOME/.vst" fake-daw
+
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"protected"* ]]
+  [ ! -e "$DAW_ENV_FILE" ]
+  [ ! -e "$COPY/.yabridge-staging-source" ]
+  [ "$(sync_call_count)" -eq 0 ]
+}
+
+@test "launcher rejects a writable path aliased by a symlinked plugin root" {
+  local target="$BATS_TEST_TMPDIR/external-vst"
+  alias_plugin_root .vst "$target"
+
+  run_daw_fixture --prefix "$REAL_PREFIX" --writable-path "$target" fake-daw
 
   [ "$status" -eq 2 ]
   [[ "$output" == *"protected"* ]]
@@ -918,6 +1185,90 @@ EOF
   [ "$(cat "$PROJECTS/output.wav")" = "rendered" ]
 }
 
+@test "a sandboxed DAW cannot write a symlinked production plugin root" {
+  require_live_sandbox
+  local target="$BATS_TEST_TMPDIR/external-vst"
+  alias_plugin_root .vst "$target"
+
+  local report="$PROJECTS/report"
+  cat > "$FIXTURE_BIN/aliasing-daw" <<EOF
+#!/bin/bash
+{
+  if printf 'injected' > "$target/yabridge/Injected.so" 2>/dev/null; then
+    printf 'alias-create=succeeded\n'
+  else
+    printf 'alias-create=failed\n'
+  fi
+  if printf 'changed' > "$target/yabridge/Production.so" 2>/dev/null; then
+    printf 'alias-overwrite=succeeded\n'
+  else
+    printf 'alias-overwrite=failed\n'
+  fi
+  printf 'alias-visible=%s\n' "\$(cat "$target/yabridge/Production.so")"
+} > "$report"
+EOF
+  chmod +x "$FIXTURE_BIN/aliasing-daw"
+
+  run "$FIXTURE_ROOT/daw-env.sh" --prefix "$REAL_PREFIX" \
+    --writable-path "$PROJECTS" aliasing-daw
+
+  [ "$status" -eq 0 ]
+  [ -f "$report" ]
+  grep -Fxq 'alias-create=failed' "$report"
+  grep -Fxq 'alias-overwrite=failed' "$report"
+  grep -Fxq 'alias-visible=production bridge' "$report"
+  [ ! -e "$target/yabridge/Injected.so" ]
+  [ "$(cat "$target/yabridge/Production.so")" = "production bridge" ]
+}
+
+# Interfaces are read from /proc/net/dev, which procfs reports per network
+# namespace. Nothing here contacts a host or a remote, so the test cannot hang
+# on an unreachable network.
+@test "a sandboxed DAW sees no real-home sibling and no host network interface" {
+  require_live_sandbox
+  printf '%s\n' 'private' > "$PRODUCTION_HOME/private-notes"
+  mkdir -p "$PRODUCTION_HOME/Documents"
+
+  local report="$PROJECTS/report"
+  cat > "$FIXTURE_BIN/probing-daw" <<EOF
+#!/bin/bash
+{
+  if [[ -e "$PRODUCTION_HOME/private-notes" ]]; then
+    printf 'home-sibling=visible\n'
+  else
+    printf 'home-sibling=hidden\n'
+  fi
+  if [[ -e "$PRODUCTION_HOME/Documents" ]]; then
+    printf 'home-documents=visible\n'
+  else
+    printf 'home-documents=hidden\n'
+  fi
+  if [[ -e "$REAL_PREFIX/system.reg" ]]; then
+    printf 'prefix=visible\n'
+  else
+    printf 'prefix=hidden\n'
+  fi
+  printf 'interfaces=%s\n' \
+    "\$(cut -d: -f1 /proc/net/dev | tail -n +3 | tr -d ' ' | tr '\n' ' ')"
+} > "$report"
+EOF
+  chmod +x "$FIXTURE_BIN/probing-daw"
+
+  run "$FIXTURE_ROOT/daw-env.sh" --prefix "$REAL_PREFIX" \
+    --writable-path "$PROJECTS" probing-daw
+
+  [ "$status" -eq 0 ]
+  [ -f "$report" ]
+  grep -Fxq 'home-sibling=hidden' "$report"
+  grep -Fxq 'home-documents=hidden' "$report"
+  # The prefix is deliberately visible read-only; hiding the rest of the home
+  # is what this asserts, not hiding the boundary itself.
+  grep -Fxq 'prefix=visible' "$report"
+  local interfaces
+  interfaces="$(sed -n 's/^interfaces=//p' "$report" | tr -s ' ' | sed 's/ *$//')"
+  [ "$interfaces" = "lo" ]
+}
+
 @test "a sandboxed DAW propagates its exit status and gets a private /tmp" {
   require_live_sandbox
   export FAKE_DAW_EXIT_STATUS=42
@@ -928,4 +1279,12 @@ EOF
   # fake-daw writes its report under the host /tmp, which the sandbox replaces
   # with a private tmpfs, so nothing of that write survives outside.
   [ ! -e "$DAW_ENV_FILE" ]
+}
+
+@test "a sandboxed DAW termination signal survives the real sandbox" {
+  require_live_sandbox
+
+  run "$FIXTURE_ROOT/daw-env.sh" --prefix "$REAL_PREFIX" suicidal-daw
+
+  [ "$status" -eq 143 ]
 }

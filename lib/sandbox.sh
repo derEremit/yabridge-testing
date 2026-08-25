@@ -24,7 +24,9 @@ SANDBOX_REAL_PREFIX="${SANDBOX_REAL_PREFIX:-}"
 SANDBOX_CLONE="${SANDBOX_CLONE:-}"
 SANDBOX_ISOLATION="${SANDBOX_ISOLATION:-}"
 SANDBOX_ISOLATED_HOME="${SANDBOX_ISOLATED_HOME:-}"
-SANDBOX_NETWORK="${SANDBOX_NETWORK:-false}"
+# Never seeded from the environment: host networking is a decision the caller
+# makes explicitly, so sourcing this file always starts from the closed state.
+SANDBOX_NETWORK=false
 SANDBOX_WRITABLE_PATHS=()
 SANDBOX_NATIVE_PLUGIN_PATHS=()
 
@@ -101,19 +103,40 @@ sandbox_assert_plain_path() {
 # Plugin roots are protected by name, so creating ~/.vst later cannot widen
 # what an already accepted option means. `/` is deliberately absent: it is
 # rejected as an ancestor of the system trees instead of matching everything.
+#
+# Every protected tree is also emitted under its canonical name. A production
+# plugin root is frequently a symlink to storage elsewhere, and a lexical check
+# alone would accept that storage under its real name — handing the caller a
+# writable bind onto production bridges.
 sandbox_protected_trees() {
-    local tree name
+    local tree name canonical
 
     for tree in "${SANDBOX_PROTECTED_SYSTEM_TREES[@]}"; do
         printf '%s\n' "$tree"
     done
     for name in "${SANDBOX_PLUGIN_ROOT_NAMES[@]}"; do
         printf '%s\n' "$HOME/$name"
+        sandbox_canonical_alias "$HOME/$name"
     done
     for tree in "$SANDBOX_REAL_PREFIX" "$SANDBOX_PROJECT_ROOT" \
         "$SANDBOX_CLONE" "$SANDBOX_ISOLATION"; do
-        [[ -n "$tree" ]] && printf '%s\n' "$tree"
+        [[ -n "$tree" ]] || continue
+        printf '%s\n' "$tree"
+        sandbox_canonical_alias "$tree"
     done
+}
+
+# The canonical name of a path, printed only when it differs from the path
+# itself. Silent when the path does not exist: the lexical name stays protected
+# either way, and an unresolvable production plugin root is refused when the
+# command is built rather than here.
+sandbox_canonical_alias() {
+    local path="$1"
+    local canonical
+
+    canonical="$(realpath -e -- "$path" 2>/dev/null)" || return 0
+    [[ "$canonical" != "$path" ]] && printf '%s\n' "$canonical"
+    return 0
 }
 
 validate_writable_path() {
@@ -182,26 +205,83 @@ resolve_daw_executable() {
     SANDBOX_DAW_PATH="$canonical"
 }
 
+# The directory a production plugin root points at, or nothing when there is no
+# plugin root to expose. An alias that cannot be proven safe is refused rather
+# than skipped: bridges the launcher cannot see are bridges it cannot promise
+# are read-only, and answering an alias with a home-wide bind would defeat the
+# boundary it is trying to enforce.
+sandbox_plugin_root_target() {
+    local root="$1"
+    local canonical
+
+    if [[ ! -L "$root" ]]; then
+        # A plain file named .vst cannot hold bridges, so there is nothing to
+        # expose and nothing to refuse.
+        [[ -d "$root" ]] && printf '%s\n' "$root"
+        return 0
+    fi
+    if ! canonical="$(realpath -e -- "$root" 2>/dev/null)"; then
+        sandbox_error "the production plugin root $root is a symlink that does not resolve"
+        return 1
+    fi
+    if [[ ! -d "$canonical" ]]; then
+        sandbox_error "the production plugin root $root does not resolve to a directory: $canonical"
+        return 1
+    fi
+    if [[ "$canonical" == *$'\n'* || "$canonical" == *$'\r'* ]]; then
+        sandbox_error "the production plugin root $root resolves to a path containing a newline"
+        return 1
+    fi
+    if [[ "$canonical" == / ]] || sandbox_path_within "$HOME" "$canonical"; then
+        sandbox_error "the production plugin root $root resolves to the real home ($canonical); refusing a home-wide bind"
+        return 1
+    fi
+    printf '%s\n' "$canonical"
+}
+
 # The directory a DAW has to see to start. A self-contained installation keeps
 # its libraries and resources next to `bin`, so a `bin` directory is widened to
-# its parent — but never far enough to expose the real home, which is exactly
-# the shortcut this launcher refuses to take.
+# its parent — but never far enough to expose the real home or the whole
+# filesystem, which are exactly the shortcuts this launcher refuses to take.
 sandbox_daw_install_root() {
     local executable="$1"
-    local directory parent
+    local directory parent root
 
     directory="$(dirname -- "$executable")"
-    if [[ "$(basename -- "$directory")" != bin ]]; then
-        printf '%s\n' "$directory"
-        return 0
+    root="$directory"
+    if [[ "$(basename -- "$directory")" == bin ]]; then
+        parent="$(dirname -- "$directory")"
+        if [[ "$parent" != / ]] && ! sandbox_path_within "$HOME" "$parent"; then
+            root="$parent"
+        fi
     fi
-    parent="$(dirname -- "$directory")"
-    if [[ "$parent" == / || "$parent" == "$HOME" ]] ||
-        sandbox_path_within "$HOME" "$parent"; then
-        printf '%s\n' "$directory"
-        return 0
+    if [[ "$root" == / ]]; then
+        sandbox_error "the DAW install root would be the whole filesystem: $executable"
+        return 1
     fi
-    printf '%s\n' "$parent"
+    if sandbox_path_within "$HOME" "$root"; then
+        sandbox_error "the DAW install root would expose the real home ($root): $executable"
+        echo "Install the DAW in its own directory instead of directly in \$HOME." >&2
+        return 1
+    fi
+    printf '%s\n' "$root"
+}
+
+# Confirms a command is being built for the executable the preflight already
+# validated. Re-resolving keeps the fail-closed file checks against a binary
+# replaced in the meantime, and a name that now resolves somewhere else is
+# refused rather than launched — the sandbox was planned around the first
+# answer, so a second one is a different program.
+sandbox_confirm_daw_executable() {
+    local requested="$1"
+    local expected="$SANDBOX_DAW_PATH"
+
+    resolve_daw_executable "$requested" || return 1
+    if [[ -n "$expected" && "$SANDBOX_DAW_PATH" != "$expected" ]]; then
+        sandbox_error "the DAW no longer resolves to the executable the preflight accepted: $expected -> $SANDBOX_DAW_PATH"
+        SANDBOX_DAW_PATH="$expected"
+        return 1
+    fi
 }
 
 require_bwrap() {
@@ -513,9 +593,10 @@ build_bwrap_command() {
     __sandbox_home="$(sandbox_require_directory "the isolated home" \
         "$SANDBOX_ISOLATED_HOME")" || return 1
 
-    resolve_daw_executable "$__sandbox_daw" || return 1
+    sandbox_confirm_daw_executable "$__sandbox_daw" || return 1
 
     local __sandbox_runtime __sandbox_entry __sandbox_canonical
+    local __sandbox_root __sandbox_install
     local -a __sandbox_argv=("$SANDBOX_BWRAP")
     __sandbox_runtime="/run/user/$(id -u)"
 
@@ -547,14 +628,19 @@ build_bwrap_command() {
     sandbox_add_mount --ro-bind "$__sandbox_project" "$__sandbox_project" ||
         return 1
     sandbox_add_read_only_input "$__sandbox_prefix" || return 1
+    # A symlinked plugin root is exposed at its canonical name. `-L` is tested
+    # too, so a dangling alias is refused here instead of vanishing quietly.
     for __sandbox_entry in "${SANDBOX_PLUGIN_ROOT_NAMES[@]}"; do
-        __sandbox_canonical="$HOME/$__sandbox_entry"
-        [[ -d "$__sandbox_canonical" && ! -L "$__sandbox_canonical" ]] ||
-            continue
+        __sandbox_root="$HOME/$__sandbox_entry"
+        [[ -e "$__sandbox_root" || -L "$__sandbox_root" ]] || continue
+        __sandbox_canonical="$(sandbox_plugin_root_target "$__sandbox_root")" ||
+            return 1
+        [[ -n "$__sandbox_canonical" ]] || continue
         sandbox_add_read_only_input "$__sandbox_canonical" || return 1
     done
-    sandbox_add_read_only_input \
-        "$(sandbox_daw_install_root "$SANDBOX_DAW_PATH")" || return 1
+    __sandbox_install="$(sandbox_daw_install_root "$SANDBOX_DAW_PATH")" ||
+        return 1
+    sandbox_add_read_only_input "$__sandbox_install" || return 1
     for __sandbox_entry in ${SANDBOX_NATIVE_PLUGIN_PATHS[@]+"${SANDBOX_NATIVE_PLUGIN_PATHS[@]}"}; do
         if ! __sandbox_canonical="$(realpath -e -- "$__sandbox_entry" \
             2>/dev/null)"; then

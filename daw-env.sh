@@ -83,6 +83,11 @@ source "$ROOT/lib/clone-state.sh"
 source "$ROOT/lib/isolated-bridges.sh"
 source "$ROOT/lib/sandbox.sh"
 
+# Host networking must come from --network on this command line and nowhere
+# else, so an exported SANDBOX_NETWORK in the calling shell cannot quietly
+# decide it. Reset after sourcing, before a single option is read.
+SANDBOX_NETWORK=false
+
 daw_env_cleanup() {
     local status=$?
     trap - EXIT INT TERM
@@ -266,10 +271,11 @@ trap - EXIT INT TERM
 
 # ── Build the sandbox command ────────────────────────────────────────────────
 # The command is an argv array, so every DAW argument reaches the DAW exactly
-# as it was given.
+# as it was given. The canonical executable from the preflight is passed rather
+# than the name, so sourcing env.sh cannot have changed which binary this is.
 SANDBOX_ISOLATED_HOME="$ISOLATED_BRIDGE_HOME"
 SANDBOX_NATIVE_PLUGIN_PATHS=(${NATIVE_PLUGIN_PATHS[@]+"${NATIVE_PLUGIN_PATHS[@]}"})
-build_bwrap_command LAUNCH_COMMAND "$DAW" "$@" || exit 1
+build_bwrap_command LAUNCH_COMMAND "$SANDBOX_DAW_PATH" "$@" || exit 1
 
 # ── Launch ───────────────────────────────────────────────────────────────────
 if [[ "$SANDBOX_NETWORK" == true ]]; then

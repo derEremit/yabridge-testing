@@ -168,7 +168,7 @@ narrower ones.
 | `$XAUTHORITY` | read-only | the one real-home input an X11 session needs |
 | project tree (this repo) | read-only | wine 11.8, test yabridge, `env.sh` |
 | production Wine prefix | **read-only** | never written, never upgraded |
-| `~/.vst`, `~/.vst3`, `~/.clap` | **read-only** | production bridges cannot be modified, and are not on any plugin path |
+| `~/.vst`, `~/.vst3`, `~/.clap` | **read-only** | production bridges cannot be modified, and are not on any plugin path. A plugin root that is a symlink is exposed read-only at its canonical target, so storage elsewhere is protected under its real name too |
 | DAW install root, `--native-plugin-path` | read-only | the DAW's own files |
 | `prefix-copy/` | writable | the validated clone |
 | `isolation/` | writable | the isolated HOME/XDG and bridge tree |
@@ -188,7 +188,8 @@ activation — and nothing else changes.
 relative paths, no symlinks, no `.`/`..` components, no `:` or newlines, and no
 option-looking values. It is rejected when it equals, contains, or sits inside
 the production prefix, a production plugin root, a system root, the project
-tree, the clone or the isolation tree. Outside those writable mounts the DAW
+tree, the clone or the isolation tree — under either its own name or the
+canonical name of a symlinked plugin root. Outside those writable mounts the DAW
 either fails to write or writes into the private tmpfs that disappears with the
 run, so save projects and renders into a path you approved.
 
@@ -201,6 +202,8 @@ run, so save projects and renders into a path you approved.
 | `Error: --writable-path overlaps protected state (...)` | the path would make production or invocation-owned state writable |
 | `Error: --writable-path must be a canonical path without symlinks` | pass the resolved path, e.g. from `realpath` |
 | `Error: '<daw>' was not found in PATH as an executable file` | the DAW is resolved before any mount is planned |
+| `Error: the DAW install root would expose the real home (...)` | the DAW binary sits directly in `$HOME`. Move it into its own directory — binding all of `$HOME` read-only is the shortcut this launcher refuses |
+| `Error: the production plugin root ... is a symlink that does not resolve` | a dangling `~/.vst`-style symlink. The launcher will not run when it cannot see the bridges it is meant to protect; repair or remove the link |
 
 All of these happen *before* the prefix is cloned, before `yabridgectl` runs
 and before the DAW starts.
