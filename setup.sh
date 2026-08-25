@@ -9,6 +9,8 @@ PREFIX="$ROOT/prefix"
 WINE_DIR="$BUILD/wine"
 YABRIDGE_SRC="$BUILD/yabridge-src"
 YABRIDGE_OUT="$BUILD/yabridge"
+HARNESS="$ROOT/yabridge-test-infra/test-harness"
+HARNESS_VENV="$HARNESS/.venv"
 ENV_FILE="$ROOT/env.sh"
 STATE_FILE="$BUILD/component-state.env"
 
@@ -174,17 +176,36 @@ for r in releases:
             exit 1
         }
 
-        ACTUAL_WINE_SHA256="$(sha256sum "$WINE_CANDIDATE_ARCHIVE")" || {
+        if [[ -n "$WINE_SHA256" ]]; then
+            if ! printf '%s  %s\n' "$WINE_SHA256" "$WINE_CANDIDATE_ARCHIVE" |
+                sha256sum -c - >/dev/null; then
+                rm -rf "$WINE_CANDIDATE_ROOT"
+                err "Wine archive checksum mismatch"
+                exit 1
+            fi
+            ACTUAL_WINE_SHA256="$WINE_SHA256"
+        else
+            ACTUAL_WINE_SHA256="$(sha256sum "$WINE_CANDIDATE_ARCHIVE")" || {
+                rm -rf "$WINE_CANDIDATE_ROOT"
+                err "Could not calculate Wine archive SHA-256"
+                exit 1
+            }
+            ACTUAL_WINE_SHA256="${ACTUAL_WINE_SHA256%% *}"
+        fi
+
+        if ! ARCHIVE_ENTRIES="$(tar -tf "$WINE_CANDIDATE_ARCHIVE")"; then
             rm -rf "$WINE_CANDIDATE_ROOT"
-            err "Could not calculate Wine archive SHA-256"
-            exit 1
-        }
-        ACTUAL_WINE_SHA256="${ACTUAL_WINE_SHA256%% *}"
-        if [[ -n "$WINE_SHA256" && "$ACTUAL_WINE_SHA256" != "$WINE_SHA256" ]]; then
-            rm -rf "$WINE_CANDIDATE_ROOT"
-            err "Wine archive SHA-256 mismatch"
+            err "Could not inspect Wine archive"
             exit 1
         fi
+        while IFS= read -r ARCHIVE_ENTRY; do
+            if [[ "$ARCHIVE_ENTRY" == /* ||
+                "$ARCHIVE_ENTRY" =~ (^|/)\.\.(/|$) ]]; then
+                rm -rf "$WINE_CANDIDATE_ROOT"
+                err "Wine archive contains an unsafe path: $ARCHIVE_ENTRY"
+                exit 1
+            fi
+        done <<< "$ARCHIVE_ENTRIES"
 
         info "Extracting wine-staging $WINE_VER..."
         if ! tar -xaf "$WINE_CANDIDATE_ARCHIVE" -C "$WINE_CANDIDATE_ROOT/"; then
@@ -209,17 +230,20 @@ for r in releases:
         fi
 
         mv -f "$WINE_CANDIDATE_ARCHIVE" "$TARBALL"
-        WINE_BACKUP="$BUILD/.wine-previous.$$"
         if [[ -e "$WINE_DIR" ]]; then
-            mv "$WINE_DIR" "$WINE_BACKUP"
+            if ! mv --exchange --no-copy -T "$EXTRACTED_DIR" "$WINE_DIR"; then
+                rm -rf "$WINE_CANDIDATE_ROOT"
+                err "Could not atomically activate Wine candidate"
+                exit 1
+            fi
+        else
+            if ! mv --no-copy -T "$EXTRACTED_DIR" "$WINE_DIR"; then
+                rm -rf "$WINE_CANDIDATE_ROOT"
+                err "Could not activate Wine candidate"
+                exit 1
+            fi
         fi
-        if ! mv "$EXTRACTED_DIR" "$WINE_DIR"; then
-            [[ ! -e "$WINE_BACKUP" ]] || mv "$WINE_BACKUP" "$WINE_DIR"
-            rm -rf "$WINE_CANDIDATE_ROOT"
-            err "Could not activate Wine candidate"
-            exit 1
-        fi
-        rm -rf "$WINE_BACKUP" "$WINE_CANDIDATE_ROOT"
+        rm -rf "$WINE_CANDIDATE_ROOT"
         ok "Wine-staging $WINE_VER extracted to $WINE_DIR"
 
         STATE_WINE_VERSION="$WINE_VER"
@@ -292,6 +316,17 @@ write_state "$STATE_FILE" \
     "WINE_SHA256=$STATE_WINE_SHA256" \
     "YABRIDGE_REF=$STATE_YABRIDGE_REF" \
     "YABRIDGE_COMMIT=$STATE_YABRIDGE_COMMIT"
+
+# ── Install test harness ─────────────────────────────────────────────────────
+if [[ ! -f "$HARNESS/pyproject.toml" ]]; then
+    err "Test harness project not found at $HARNESS"
+    exit 1
+fi
+info "Installing test harness into $HARNESS_VENV..."
+python3 -m venv "$HARNESS_VENV"
+"$HARNESS_VENV/bin/python" -m pip install \
+    --disable-pip-version-check -e "$HARNESS"
+ok "Test harness installed"
 
 # ── Generate env.sh ──────────────────────────────────────────────────────────
 info "Generating $ENV_FILE..."
@@ -367,12 +402,17 @@ cat > "$ROOT/test.sh" << 'TESTEOF'
 # Run yabridge test harness with isolated wine + yabridge
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd)"
-source "$ROOT/env.sh"
 HARNESS="$ROOT/yabridge-test-infra/test-harness"
-if [[ -f "$HARNESS/.venv/bin/activate" ]]; then
-    source "$HARNESS/.venv/bin/activate"
+if [[ ! -f "$ROOT/env.sh" ]]; then
+    echo "error: environment is not configured; run ./setup.sh first" >&2
+    exit 1
 fi
-exec yabridge-test "$@"
+if [[ ! -x "$HARNESS/.venv/bin/yabridge-test" ]]; then
+    echo "error: test harness is not installed; run ./setup.sh first" >&2
+    exit 1
+fi
+source "$ROOT/env.sh"
+exec "$HARNESS/.venv/bin/yabridge-test" "$@"
 TESTEOF
 chmod +x "$ROOT/test.sh"
 

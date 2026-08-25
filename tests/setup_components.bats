@@ -11,9 +11,17 @@ setup() {
   FIXTURE="$BATS_TEST_TMPDIR/project"
   FAKE_BIN="$BATS_TEST_TMPDIR/bin"
   CALLS="$BATS_TEST_TMPDIR/calls"
-  mkdir -p "$FIXTURE/lib" "$FIXTURE/build" "$FIXTURE/prefix" "$FAKE_BIN"
+  mkdir -p \
+    "$FIXTURE/lib" \
+    "$FIXTURE/build" \
+    "$FIXTURE/prefix" \
+    "$FIXTURE/yabridge-test-infra" \
+    "$FAKE_BIN"
   cp "$PROJECT_ROOT/setup.sh" "$FIXTURE/setup.sh"
   cp "$PROJECT_ROOT/lib/component-state.sh" "$FIXTURE/lib/component-state.sh"
+  cp -R \
+    "$PROJECT_ROOT/yabridge-test-infra/test-harness" \
+    "$FIXTURE/yabridge-test-infra/test-harness"
   touch "$FIXTURE/prefix/system.reg" "$CALLS"
   create_fake_commands
 }
@@ -39,6 +47,15 @@ EOF
 
   cat > "$FAKE_BIN/sha256sum" <<'EOF'
 #!/bin/bash
+if [[ "$1" == "-c" ]]; then
+  read -r expected archive
+  if [[ "$expected" == "$FAKE_SHA" ]]; then
+    printf '%s: OK\n' "$archive"
+    exit 0
+  fi
+  printf '%s: FAILED\n' "$archive"
+  exit 1
+fi
 printf '%s  %s\n' "$FAKE_SHA" "${!#}"
 EOF
 
@@ -46,6 +63,10 @@ EOF
 #!/bin/bash
 printf 'tar %s\n' "$*" >> "$CALLS"
 [[ "$FAKE_TAR_FAIL" == true ]] && exit 1
+if [[ "$1" == "-tf" ]]; then
+  printf 'wine-11.8-staging-amd64/bin/wine\n'
+  exit 0
+fi
 while [[ $# -gt 0 ]]; do
   if [[ "$1" == "-C" ]]; then
     build="$2"
@@ -95,6 +116,23 @@ if [[ "$1" == "-C" ]]; then
   mkdir -p "$2"
   touch "$2/libyabridge-vst2.so" "$2/yabridge-host.exe"
 fi
+EOF
+
+  cat > "$FAKE_BIN/python3" <<'EOF'
+#!/bin/bash
+if [[ "$1" == "-m" && "$2" == "venv" ]]; then
+  mkdir -p "$3/bin"
+  cp "$0" "$3/bin/python"
+  chmod +x "$3/bin/python"
+  exit 0
+fi
+if [[ "$1" == "-m" && "$2" == "pip" ]]; then
+  venv_bin="$(cd "$(dirname "$0")" && pwd)"
+  printf '#!/bin/bash\nexit 0\n' > "$venv_bin/yabridge-test"
+  chmod +x "$venv_bin/yabridge-test"
+  exit 0
+fi
+exit 1
 EOF
 
   chmod +x "$FAKE_BIN"/*
@@ -181,7 +219,7 @@ run_setup_fixture() {
   run_setup_fixture --no-yabridge --wine-version 11.8 --wine-sha256 "$WINE_11_8_SHA"
 
   [ "$status" -eq 1 ]
-  [[ "$output" == *"Wine archive SHA-256 mismatch"* ]]
+  [[ "$output" == *"Wine archive checksum mismatch"* ]]
   assert_prior_wine_preserved
 }
 
