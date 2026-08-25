@@ -112,13 +112,6 @@ launcher_manifest_json() {
   manifest_json "$1"
 }
 
-daw_env_value() {
-  local key="$1"
-  local line
-  line="$(grep -m1 "^$key=" "$DAW_ENV_FILE")"
-  printf '%s\n' "${line#"$key"=}"
-}
-
 # The capability preflight runs bwrap too, so probe invocations are filtered out
 # before asserting on the launch command.
 launched_argv() {
@@ -255,21 +248,6 @@ if not isinstance(value, str):
     raise SystemExit(f"{sys.argv[2]} is {type(value).__name__}, not a string")
 print(value)
 PY
-}
-
-# A command that always fails, so encoder and rename failures are observable
-# without depending on file permissions.
-shadow_failing_command() {
-  local name="$1"
-  local directory="$BATS_TEST_TMPDIR/broken-bin"
-  mkdir -p "$directory"
-  cat > "$directory/$name" <<'EOF'
-#!/bin/bash
-printf 'fixture: refusing to run\n' >&2
-exit 1
-EOF
-  chmod +x "$directory/$name"
-  printf '%s\n' "$directory"
 }
 
 # ── Schema, types and identity values ────────────────────────────────────────
@@ -493,8 +471,37 @@ manifest.json" MANIFEST_COMMAND
   write_manifest
 
   [ "$status" -ne 0 ]
-  [[ "$output" == *"source"* ]]
+  [[ "$output" == *"no longer the one this clone was made from"* ]]
   [ ! -e "$MANIFEST_DESTINATION" ]
+}
+
+# Not being able to read the source is not evidence that the source changed.
+# Reporting the second when only the first happened sends the reader after a
+# clone that is fine.
+@test "run manifest separates an unreadable source identity from a mismatch" {
+  load_run_manifest
+  stage_manifest_inputs "$MANIFEST_TREE"
+
+  PATH="$(shadow_failing_command stat):$PATH" write_manifest
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"could not read the source prefix identity"* ]]
+  [[ "$output" != *"no longer the one this clone was made from"* ]]
+  [ ! -e "$MANIFEST_DESTINATION" ]
+}
+
+@test "run manifest reports a clone identity it cannot read" {
+  load_run_manifest
+  stage_manifest_inputs "$MANIFEST_TREE"
+  local original_path="$PATH"
+
+  PATH="$(shadow_failing_command stat):$PATH"
+  run run_manifest_verify_clone_identity "$MANIFEST_CLONE"
+  PATH="$original_path"
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"could not read the prefix clone identity"* ]]
+  [[ "$output" != *"changed after it was validated"* ]]
 }
 
 @test "run manifest refuses provenance naming a different source path" {
@@ -896,6 +903,27 @@ manifest.json" MANIFEST_COMMAND
   [ "$status" -ne 0 ]
   [[ "$output" == *"symlink"* ]]
   [ "$(cat "$MANIFEST_BASE/outside-target.json")" = "not a manifest" ]
+  # Refusing is only half an answer: whoever hits this has a launcher that will
+  # not start until they deal with the file, so the way out has to be printed
+  # with the refusal.
+  [[ "$output" == *"ls -l -- "* ]]
+  [[ "$output" == *"rm -- "* ]]
+  [[ "$output" == *"$MANIFEST_DESTINATION"* ]]
+}
+
+# Every refusal from this library is one of several kinds of `Error:` line a
+# launch can print, and the reader has to be able to tell which phase spoke.
+# README documents this exact shape.
+@test "run manifest refusals say the run manifest refused" {
+  load_run_manifest
+  stage_manifest_inputs "$MANIFEST_TREE"
+  rm -f "$MANIFEST_STATE"
+
+  write_manifest
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Error: run manifest: "* ]]
+  [[ "$output" == *"component state"* ]]
 }
 
 @test "run manifest refuses a destination that is not a regular file" {
@@ -987,6 +1015,52 @@ manifest.json" MANIFEST_COMMAND
   [[ "$output" == *"manifest:"* ]]
 }
 
+# A generated environment reached through a symlinked parent, and a yabridge
+# home that is itself a symlink, are both perfectly usable. The run records the
+# objects they name instead of refusing the names it was given — and it does not
+# refuse them at all.
+@test "a launch through noncanonical components records canonical identities" {
+  stage_launcher_fixture
+  local wine_canonical yabridge_canonical
+  wine_canonical="$(realpath -e -- "$FIXTURE_BIN/wine")"
+  yabridge_canonical="$(realpath -e -- "$YABRIDGE_HOME")"
+  ln -s "$FIXTURE_BIN" "$BATS_TEST_TMPDIR/bin-link"
+  ln -s "$YABRIDGE_HOME" "$BATS_TEST_TMPDIR/yabridge-link"
+  cat > "$FIXTURE_ROOT/env.sh" <<EOF
+export WINELOADER="$BATS_TEST_TMPDIR/bin-link/wine"
+export WINESERVER="$FIXTURE_BIN/wineserver"
+export WINEDLLPATH="$BATS_TEST_TMPDIR/winedll"
+export YABRIDGE_BIN="$BATS_TEST_TMPDIR/yabridge-link"
+export PATH="$FIXTURE_BIN:\$PATH"
+export LD_LIBRARY_PATH="$BATS_TEST_TMPDIR/lib"
+EOF
+
+  run_launcher --prefix "$REAL_PREFIX" fake-daw
+
+  [ "$status" -eq 0 ]
+  [ "$(daw_env_value manifest)" = "present" ]
+  [ "$(launcher_manifest wine_executable)" = "$wine_canonical" ]
+  [ "$(launcher_manifest yabridge_home)" = "$yabridge_canonical" ]
+  [ "$(launcher_manifest yabridgectl_path)" = "$yabridge_canonical/yabridgectl" ]
+}
+
+# yabridgectl installed by a package manager is commonly a symlink into a
+# versioned directory. That is an identity to resolve, not a reason to stop a
+# launch after the clone and the bridges have already been built.
+@test "a PATH-resolved symlinked yabridgectl records its canonical executable" {
+  stage_launcher_fixture
+  local tools="$BATS_TEST_TMPDIR/tools"
+  mkdir -p "$tools"
+  mv "$YABRIDGE_HOME/yabridgectl" "$tools/yabridgectl"
+  ln -s "$tools/yabridgectl" "$FIXTURE_BIN/yabridgectl"
+
+  run_launcher --prefix "$REAL_PREFIX" fake-daw
+
+  [ "$status" -eq 0 ]
+  [ "$(daw_env_value manifest)" = "present" ]
+  [ "$(launcher_manifest yabridgectl_path)" = "$(realpath -e -- "$tools/yabridgectl")" ]
+}
+
 @test "launcher records the source identity the clone was made from" {
   stage_launcher_fixture
   local device inode
@@ -1013,6 +1087,31 @@ manifest.json" MANIFEST_COMMAND
   [ ! -e "$DAW_ENV_FILE" ]
   [ ! -e "$LAUNCHER_MANIFEST" ]
   [ "$(launched_argv)" = "" ]
+  # Whether the components were ever recorded is knowable before anything is
+  # created, so the refusal costs the user neither a clone nor a bridge sync.
+  [ ! -e "$COPY" ]
+  [ ! -e "$ISOLATION" ]
+  refute compgen -G "$FIXTURE_ROOT/prefix-copy.new.*"
+  # yabridgectl writes this log the first time it runs, so its absence is proof
+  # no bridge sync was attempted.
+  [ ! -e "$CALLS" ]
+}
+
+# The generated environment is what names the components a run records, and
+# whether it exists is knowable before anything is created — a project that was
+# never set up should not be told so only after it has been cloned.
+@test "a missing generated environment is refused before anything is cloned" {
+  stage_launcher_fixture
+  rm -f "$FIXTURE_ROOT/env.sh"
+
+  run_launcher --prefix "$REAL_PREFIX" fake-daw
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"env.sh"* ]]
+  [[ "$output" == *"setup.sh"* ]]
+  [ ! -e "$COPY" ]
+  [ ! -e "$ISOLATION" ]
+  [ ! -e "$DAW_ENV_FILE" ]
 }
 
 @test "a failed manifest keeps the manifest an earlier run recorded" {
@@ -1030,6 +1129,28 @@ manifest.json" MANIFEST_COMMAND
   [ ! -e "$DAW_ENV_FILE" ]
   [ "$(sha256sum < "$LAUNCHER_MANIFEST")" = "$before" ]
   [ "$(find "$ISOLATION" -maxdepth 1 -name '.run-manifest.*' | wc -l)" -eq 0 ]
+}
+
+# The manifest re-reads the finished bwrap argv without knowing how many values
+# each bwrap option takes. That scan is only sound while no option *value* can
+# be read as a policy flag or as the argument separator, so the property is
+# pinned here for the command the launcher really builds, with every
+# path-carrying option in play.
+@test "no sandbox option value can be mistaken for a policy flag or separator" {
+  stage_launcher_fixture
+  mkdir -p "$BATS_TEST_TMPDIR/writable" "$BATS_TEST_TMPDIR/native-plugins"
+
+  run_launcher --writable-path "$BATS_TEST_TMPDIR/writable" \
+    --native-plugin-path "$BATS_TEST_TMPDIR/native-plugins" \
+    --prefix "$REAL_PREFIX" fake-daw
+
+  [ "$status" -eq 0 ]
+  local tokens
+  tokens="$(tr ' ' '\n' <<< "$(launched_argv)")"
+  # One separator, and the policy flags appear only where the launcher put them.
+  [ "$(grep -cx -e '--' <<< "$tokens")" -eq 1 ]
+  [ "$(grep -cx -e '--unshare-net' <<< "$tokens")" -eq 1 ]
+  [ "$(grep -cx -e '--unshare-user' <<< "$tokens")" -le 1 ]
 }
 
 @test "launcher records the network policy the sandbox command enforces" {

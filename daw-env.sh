@@ -203,11 +203,22 @@ SANDBOX_PROJECT_ROOT="$ROOT"
 SANDBOX_REAL_PREFIX="$REAL_PREFIX"
 SANDBOX_CLONE="$COPY"
 SANDBOX_ISOLATION="$ROOT/isolation"
+COMPONENT_STATE_FILE="$ROOT/build/component-state.env"
 if [[ "$CLEAN" != true ]]; then
     resolve_daw_executable "$DAW" || exit 1
     require_bwrap || exit 1
     assert_sandbox_namespaces || exit 1
     assert_sandbox_inputs || exit 1
+    # Both are knowable now: the generated environment names every component
+    # this run uses, and the component state says which ones setup installed.
+    # Asking here means a project that was never set up is refused before it
+    # costs a clone and a bridge sync.
+    if [[ ! -f "$ROOT/env.sh" ]]; then
+        echo "Error: the generated environment is missing: $ROOT/env.sh" >&2
+        echo "Run ./setup.sh to generate it." >&2
+        exit 1
+    fi
+    assert_recorded_components "$COMPONENT_STATE_FILE" || exit 1
     for requested in ${REQUESTED_WRITABLE_PATHS[@]+"${REQUESTED_WRITABLE_PATHS[@]}"}; do
         validate_writable_path "$requested" || exit 2
         SANDBOX_WRITABLE_PATHS+=("$requested")
@@ -257,6 +268,16 @@ fi
 source "$ROOT/env.sh"
 export WINEPREFIX="$COPY"
 
+# ── Resolve the components this run will use and record ──────────────────────
+# env.sh names absolute paths, but a project kept behind a symlink or a Wine
+# build reached through a linked directory still names usable executables. Each
+# one is resolved once, here, so the bridges, the launch and the manifest all
+# refer to the same object — and so a usable component is never refused later
+# for the name it was given rather than for what it is.
+WINE_EXECUTABLE="$(resolve_component_executable "the Wine executable" \
+    "${WINELOADER:-}")" || exit 1
+export WINELOADER="$WINE_EXECUTABLE"
+
 # ── Wine diagnostics ─────────────────────────────────────────────────────────
 # Only --quiet-wine silences Wine. Otherwise the value the calling shell set is
 # restored exactly as it was given, and when it set nothing the variable is left
@@ -293,13 +314,18 @@ trap daw_env_cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-YABRIDGE_HOME="${YABRIDGE_BIN:-$ROOT/build/yabridge}"
+YABRIDGE_HOME="$(resolve_component_directory "the yabridge home" \
+    "${YABRIDGE_BIN:-$ROOT/build/yabridge}")" || exit 1
 YABRIDGECTL="$YABRIDGE_HOME/yabridgectl"
 if [[ ! -x "$YABRIDGECTL" ]] && ! YABRIDGECTL="$(command -v yabridgectl)"; then
     echo "Error: yabridgectl not found in $YABRIDGE_HOME or PATH" >&2
     echo "Run ./setup.sh to build it, or install yabridgectl." >&2
     exit 1
 fi
+# A packaged yabridgectl is usually a symlink into a versioned directory, so
+# what is recorded is the executable that link leads to.
+YABRIDGECTL="$(resolve_component_executable "the yabridgectl executable" \
+    "$YABRIDGECTL")" || exit 1
 
 # Both are read by lib/isolated-bridges.sh.
 # shellcheck disable=SC2034
@@ -329,8 +355,8 @@ build_bwrap_command LAUNCH_COMMAND "$SANDBOX_DAW_PATH" "$@" || exit 1
 RUN_MANIFEST_SOURCE="$REAL_PREFIX"
 RUN_MANIFEST_CLONE="$COPY"
 RUN_MANIFEST_CLONE_IDENTITY="$VALIDATED_CLONE_IDENTITY"
-RUN_MANIFEST_STATE_FILE="$ROOT/build/component-state.env"
-RUN_MANIFEST_WINE_EXECUTABLE="${WINELOADER:-}"
+RUN_MANIFEST_STATE_FILE="$COMPONENT_STATE_FILE"
+RUN_MANIFEST_WINE_EXECUTABLE="$WINE_EXECUTABLE"
 RUN_MANIFEST_YABRIDGE_HOME="$YABRIDGE_HOME"
 RUN_MANIFEST_YABRIDGECTL="$YABRIDGECTL"
 RUN_MANIFEST_BRIDGE_HOME="$ISOLATED_BRIDGE_HOME"

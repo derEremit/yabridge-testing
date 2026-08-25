@@ -183,7 +183,7 @@ run_setup_fixture() {
     FAKE_CANDIDATE_INVALID="${FAKE_CANDIDATE_INVALID:-false}" \
     FAKE_YABRIDGE_FETCH_COMMIT="${FAKE_YABRIDGE_FETCH_COMMIT:-$YABRIDGE_COMMIT}" \
     FAKE_YABRIDGE_HEAD_COMMIT="${FAKE_YABRIDGE_HEAD_COMMIT:-$YABRIDGE_COMMIT}" \
-    "$FIXTURE/setup.sh" "$@"
+    "${SETUP_INVOCATION_PATH:-$FIXTURE/setup.sh}" "$@"
 }
 
 @test "explicit Wine version requires a digest" {
@@ -291,6 +291,26 @@ run_setup_fixture() {
 # environment must not silence them for every later run. The one place setup
 # still suppresses them is its own prefix initialization, where the output is
 # noise nobody asked for.
+# A project reached through a symlink is a normal way to keep a working copy
+# somewhere convenient. The generated environment has to name the directory the
+# files actually live in, because every later run — and the run manifest — is
+# about those objects, not about the name the invocation happened to use.
+@test "setup invoked through a symlinked project writes canonical paths" {
+  local link="$BATS_TEST_TMPDIR/project-link"
+  local canonical
+  canonical="$(realpath -e -- "$FIXTURE")"
+  ln -s "$FIXTURE" "$link"
+
+  SETUP_INVOCATION_PATH="$link/setup.sh" run_setup_fixture --no-wine --no-yabridge
+
+  [ "$status" -eq 0 ]
+  [ -f "$FIXTURE/env.sh" ]
+  grep -Fq "$canonical/build/wine/bin/wine" "$FIXTURE/env.sh"
+  grep -Fq "$canonical/build/yabridge" "$FIXTURE/env.sh"
+  refute grep -Fq "$link" "$FIXTURE/env.sh"
+  refute grep -Fq "$link" "$FIXTURE/test.sh"
+}
+
 @test "generated environment leaves Wine diagnostics to the caller" {
   seed_wine_cache
   rm -f "$FIXTURE/prefix/system.reg"

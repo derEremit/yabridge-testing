@@ -165,13 +165,6 @@ run_daw_fixture() {
   run "$FIXTURE_ROOT/daw-env.sh" "$@"
 }
 
-daw_env_value() {
-  local key="$1"
-  local line
-  line="$(grep -m1 "^$key=" "$DAW_ENV_FILE")"
-  printf '%s\n' "${line#"$key"=}"
-}
-
 sync_call_count() {
   if [[ ! -f "$CALLS" ]]; then
     printf '0\n'

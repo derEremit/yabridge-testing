@@ -286,13 +286,6 @@ run_daw_fixture() {
   run "$FIXTURE_ROOT/daw-env.sh" "$@"
 }
 
-daw_env_value() {
-  local key="$1"
-  local line
-  line="$(grep -m1 "^$key=" "$DAW_ENV_FILE")"
-  printf '%s\n' "${line#"$key"=}"
-}
-
 # The capability preflight runs bwrap too, so probe invocations are filtered
 # out before asserting on the launch command.
 launched_argv() {

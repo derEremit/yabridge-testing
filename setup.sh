@@ -3,7 +3,12 @@
 # No system install — everything under build/ and prefix/
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")" && pwd)"
+# The physical directory, not the name this invocation happened to use. A
+# project kept behind a symlink is normal, and every path this script records —
+# env.sh, test.sh, the component state — has to name the objects the files
+# actually live in, because that is what later runs and the run manifest are
+# about.
+ROOT="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
 BUILD="$ROOT/build"
 PREFIX="$ROOT/prefix"
 WINE_DIR="$BUILD/wine"
@@ -563,7 +568,7 @@ cat > "$ROOT/test.sh" << 'TESTEOF'
 #!/bin/bash
 # Run yabridge test harness with isolated wine + yabridge
 set -euo pipefail
-ROOT="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
 HARNESS="$ROOT/yabridge-test-infra/test-harness"
 if [[ ! -f "$ROOT/env.sh" ]]; then
     echo "error: environment is not configured; run ./setup.sh first" >&2

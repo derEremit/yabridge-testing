@@ -267,6 +267,13 @@ Keys are sorted and the file always ends with a newline, so two runs are easy to
 `diff`. `namespace_mode` is `user` or `setuid` — whichever the sandbox command
 that was actually verified uses.
 
+Every recorded path is the canonical one. Components are resolved to the objects
+they name before anything uses them, so a project kept behind a symlink, a Wine
+build reached through a linked directory, or a packaged `yabridgectl` that is a
+symlink into a versioned directory all launch normally and are recorded as what
+they resolve to. `setup.sh` does the same for its own location, so `env.sh` and
+`test.sh` name the directory the files really live in.
+
 Every value is re-derived at write time rather than copied from what an earlier
 phase believed:
 
@@ -294,7 +301,9 @@ only the temporary this invocation created.
 **If the manifest cannot be written, the DAW does not start.** That is
 deliberate: a run nobody can identify afterwards is exactly the run you will
 want to identify. The error names the field that could not be proven, and the
-manifest from your previous launch is left intact.
+manifest from your previous launch is left intact. Whether the components were
+recorded at all is checked before the prefix is cloned, so a project that never
+ran `./setup.sh` is refused without leaving a clone or a bridge tree behind.
 
 ### Wine diagnostics
 
@@ -551,12 +560,26 @@ specific socket those variables name, and nothing else.
 ### The launcher refuses because it cannot record the run
 
 Messages like `Error: run manifest: …` mean an identity the manifest must
-record could not be proven — most often `build/component-state.env` is missing
-(run `./setup.sh`), the Wine executable no longer reports the version setup
-recorded (re-run `./setup.sh --no-yabridge`), or `prefix-copy/` is no longer the
-clone whose provenance was validated (`./daw-env.sh --fresh <daw>`). The DAW is
-not started and `isolation/run-manifest.json` from your last successful launch
-is left untouched.
+record could not be proven — most often `env.sh` or `build/component-state.env`
+is missing (run `./setup.sh`), the Wine executable no longer reports the version
+setup recorded (re-run `./setup.sh --no-yabridge`), or `prefix-copy/` is no
+longer the clone whose provenance was validated (`./daw-env.sh --fresh <daw>`).
+The first two are checked before the prefix is cloned, so they cost nothing. The
+DAW is not started and `isolation/run-manifest.json` from your last successful
+launch is left untouched.
+
+If the message says the destination is a symlink or is not a regular file,
+something replaced `isolation/run-manifest.json` — the launcher will not write
+through it, because this run's provenance would land wherever that points. The
+refusal prints what to look at and what to remove:
+
+```bash
+ls -l -- isolation/run-manifest.json   # see what it actually is
+rm -- isolation/run-manifest.json      # only if it is the link, not your data
+```
+
+The next launch writes a fresh manifest. Nothing else in `isolation/` is
+touched, so your generated bridges stay as they were.
 
 ### Wine output is too noisy, or too quiet
 

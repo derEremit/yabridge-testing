@@ -116,7 +116,7 @@ validate_clone_provenance() {
     local clone="$1"
     local source="$2"
     local provenance="$clone/$CLONE_PROVENANCE_NAME"
-    local expected_device expected_inode
+    local expected_device expected_inode identity
     local -a fields=()
 
     assert_clone_destination_type "$clone" || return 1
@@ -138,7 +138,15 @@ validate_clone_provenance() {
         return 1
     fi
 
-    read -r expected_device expected_inode <<< "$(source_identity "$source")"
+    # `read` succeeds on the empty line a failed `stat` leaves behind, which
+    # would report an unreadable source as a clone that belongs somewhere else —
+    # and send the reader to the recovery steps for a clone that is fine.
+    if ! identity="$(source_identity "$source")" ||
+        [[ ! "$identity" =~ ^[0-9]+\ [0-9]+$ ]]; then
+        clone_state_error "could not read the source prefix identity: $source"
+        return 1
+    fi
+    read -r expected_device expected_inode <<< "$identity"
     if [[ "${fields[0]}" != "$source" ||
           "${fields[1]}" != "$expected_device" ||
           "${fields[2]}" != "$expected_inode" ]]; then

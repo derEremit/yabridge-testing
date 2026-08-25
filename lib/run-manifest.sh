@@ -34,6 +34,14 @@ RUN_MANIFEST_PROVENANCE_NAME=".yabridge-staging-source"
 # run_manifest.bats asserts that both lists stay identical.
 RUN_MANIFEST_BRIDGE_RELATIVE_ROOTS=(".vst/yabridge" ".vst3/yabridge" ".clap/yabridge")
 
+# The shape each recorded component identity has to have. Declared once so the
+# pre-clone check and the manifest itself cannot drift into accepting different
+# things.
+RUN_MANIFEST_WINE_VERSION_PATTERN='^[A-Za-z0-9][A-Za-z0-9._+-]*$'
+RUN_MANIFEST_WINE_SHA256_PATTERN='^[0-9a-fA-F]{64}$'
+RUN_MANIFEST_YABRIDGE_REF_PATTERN='^[A-Za-z0-9][A-Za-z0-9._/+@-]*$'
+RUN_MANIFEST_YABRIDGE_COMMIT_PATTERN='^[0-9a-fA-F]{40}$'
+
 # Inputs the launcher fills in once every earlier phase has succeeded.
 RUN_MANIFEST_SOURCE=""
 RUN_MANIFEST_CLONE=""
@@ -65,8 +73,30 @@ RUN_MANIFEST_NAMESPACE_MODE=""
 RUN_MANIFEST_BRIDGE_ROOT_PATHS=()
 RUN_MANIFEST_OWNED_TEMPORARY=""
 
+# A launch prints refusals from the clone, the bridges, the sandbox and this
+# library, and the reader has to be able to tell which one spoke. The prefix is
+# part of the documented output, so tests pin it.
 run_manifest_error() {
-    echo "Error: $*" >&2
+    echo "Error: run manifest: $*" >&2
+}
+
+# A destination that is a symlink or is not a regular file is refused rather
+# than written through, and whoever hits it has a launcher that will not start
+# until the file is dealt with — so the way out is printed with the refusal.
+run_manifest_destination_recovery() {
+    local destination="$1"
+    local removal="$2"
+    local quoted
+
+    printf -v quoted '%q' "$destination"
+    if [[ -L "$destination" ]]; then
+        echo "It is a link to: $(readlink -- "$destination" 2>/dev/null)" >&2
+    fi
+    echo "Nothing was written. Inspect it, then clear the way for the next run:" >&2
+    echo "  ls -l -- $quoted" >&2
+    if [[ -n "$removal" ]]; then
+        echo "  $removal -- $quoted" >&2
+    fi
 }
 
 # A path is only usable as an identity when it is absolute, free of newlines,
@@ -151,12 +181,94 @@ run_manifest_boolean() {
     fi
 }
 
+# ── Resolving a component before it is recorded ───────────────────────────────
+#
+# The checks above are what the manifest demands of a value it is about to
+# publish: an identity has to be the canonical name of the object, or the
+# document would describe something other than the run. These two are the other
+# half of that contract — the launcher's way of *earning* a canonical name.
+#
+# A project reached through a symlinked parent, a yabridge home that is a link,
+# a yabridgectl installed as a symlink into a versioned directory: all normal,
+# all usable, and none of them a reason to stop a launch. Each is resolved to
+# the object it names, once, before anything uses it, so the bridges and the
+# manifest agree and the strict checks above have nothing left to refuse.
+# What genuinely cannot be resolved is refused here instead — earlier, and with
+# the name the user actually typed in the message.
+run_manifest_resolve_path() {
+    local label="$1"
+    local value="${2:-}"
+    local canonical
+
+    if [[ -z "$value" ]]; then
+        run_manifest_error "$label was not set; refusing to launch"
+        return 1
+    fi
+    if [[ "$value" == *$'\n'* || "$value" == *$'\r'* ]]; then
+        run_manifest_error "$label must not contain newlines: $value"
+        return 1
+    fi
+    if ! canonical="$(realpath -e -- "$value" 2>/dev/null)"; then
+        run_manifest_error "$label does not exist: $value"
+        return 1
+    fi
+    if [[ "$canonical" == *$'\n'* || "$canonical" == *$'\r'* ]]; then
+        run_manifest_error "$label resolves to a path containing a newline: $value"
+        return 1
+    fi
+    printf '%s\n' "$canonical"
+}
+
+resolve_component_directory() {
+    local label="$1"
+    local canonical
+
+    canonical="$(run_manifest_resolve_path "$label" "${2:-}")" || return 1
+    if [[ ! -d "$canonical" ]]; then
+        run_manifest_error "$label is not a directory: $canonical"
+        return 1
+    fi
+    printf '%s\n' "$canonical"
+}
+
+resolve_component_executable() {
+    local label="$1"
+    local canonical
+
+    canonical="$(run_manifest_resolve_path "$label" "${2:-}")" || return 1
+    if [[ ! -f "$canonical" || ! -x "$canonical" ]]; then
+        run_manifest_error "$label is not an executable file: $canonical"
+        return 1
+    fi
+    printf '%s\n' "$canonical"
+}
+
 run_manifest_source_identity() {
     stat -Lc '%d %i' -- "$1"
 }
 
 run_manifest_clone_identity() {
     stat -c '%d %i' -- "$1"
+}
+
+# Not being able to read an identity and reading a different identity are two
+# different findings, and only the second one is a mismatch. `read` succeeds on
+# the empty line an unreadable `stat` leaves behind, which would quietly turn
+# the first into the second and send the reader after state that is fine, so
+# every identity is required to have the shape `stat` promises before it is
+# compared to anything.
+run_manifest_identity() {
+    local label="$1"
+    local path="$2"
+    local reader="$3"
+    local identity
+
+    if ! identity="$("$reader" "$path")" ||
+        [[ ! "$identity" =~ ^[0-9]+\ [0-9]+$ ]]; then
+        run_manifest_error "could not read the $label identity: $path"
+        return 1
+    fi
+    printf '%s\n' "$identity"
 }
 
 # The clone's provenance record, read as three plain lines and never evaluated,
@@ -168,7 +280,7 @@ run_manifest_verify_provenance() {
     local clone="$1"
     local source="$2"
     local provenance="$clone/$RUN_MANIFEST_PROVENANCE_NAME"
-    local device inode
+    local device inode identity
     local -a fields=()
 
     if [[ -L "$provenance" || ! -f "$provenance" ]]; then
@@ -191,10 +303,9 @@ run_manifest_verify_provenance() {
         run_manifest_error "clone provenance names a different source prefix: ${fields[0]}"
         return 1
     fi
-    if ! read -r device inode <<< "$(run_manifest_source_identity "$source")"; then
-        run_manifest_error "could not identify the source prefix: $source"
-        return 1
-    fi
+    identity="$(run_manifest_identity "source prefix" "$source" \
+        run_manifest_source_identity)" || return 1
+    read -r device inode <<< "$identity"
     if [[ "${fields[1]}" != "$device" || "${fields[2]}" != "$inode" ]]; then
         run_manifest_error "the source prefix is no longer the one this clone was made from: $source"
         return 1
@@ -214,10 +325,8 @@ run_manifest_verify_clone_identity() {
         run_manifest_error "the prefix clone was not validated before this run was recorded"
         return 1
     fi
-    if ! current="$(run_manifest_clone_identity "$clone")"; then
-        run_manifest_error "could not identify the prefix clone: $clone"
-        return 1
-    fi
+    current="$(run_manifest_identity "prefix clone" "$clone" \
+        run_manifest_clone_identity)" || return 1
     if [[ "$current" != "$RUN_MANIFEST_CLONE_IDENTITY" ]]; then
         run_manifest_error "the prefix clone changed after it was validated: $clone"
         return 1
@@ -309,6 +418,14 @@ run_manifest_verify_command() {
         run_manifest_error "the sandbox command does not start with the verified bwrap executable: ${__run_manifest_command[0]}"
         return 1
     fi
+    # This scan reads the finished argv without knowing bwrap's option arities,
+    # so a *value* that happened to be the string `--`, `--unshare-user` or
+    # `--unshare-net` would be read as the separator or as a policy flag.
+    # lib/sandbox.sh only ever passes absolute paths, fixed environment names
+    # and their values, none of which can be those three strings, and
+    # tests/run_manifest.bats pins that on the command the launcher builds. Any
+    # new option whose value is caller-controlled has to be checked against
+    # this invariant, or parsed with its arity known.
     for ((index = 1; index < total; index++)); do
         argument="${__run_manifest_command[index]}"
         if [[ "$argument" == -- ]]; then
@@ -379,10 +496,14 @@ run_manifest_destination() {
     fi
     if [[ -L "$destination" ]]; then
         run_manifest_error "the run manifest destination is a symlink: $destination"
+        run_manifest_destination_recovery "$destination" "rm"
         return 1
     fi
     if [[ -e "$destination" && ! -f "$destination" ]]; then
         run_manifest_error "the run manifest destination is not a regular file: $destination"
+        # No removal command is suggested for something that is not a plain
+        # file: whatever it is, the user decides what happens to it.
+        run_manifest_destination_recovery "$destination" ""
         return 1
     fi
     if [[ "$(basename -- "$destination")" != "$RUN_MANIFEST_NAME" ]]; then
@@ -397,6 +518,30 @@ run_manifest_destination() {
         return 1
     fi
     printf '%s\n' "$destination"
+}
+
+# Whether setup ever recorded which Wine and which yabridge this project
+# installed is knowable before a single byte is cloned. Asking now means a
+# project that never ran setup is refused for free, instead of after a clone and
+# a bridge sync that are about to be thrown away.
+assert_recorded_components() {
+    local state
+
+    if ! declare -F read_state > /dev/null; then
+        run_manifest_error "lib/component-state.sh must be sourced before components are checked"
+        return 1
+    fi
+
+    state="$(run_manifest_require_file "the component state file" "${1:-}")" ||
+        return 1
+    run_manifest_state_value WINE_VERSION \
+        "$RUN_MANIFEST_WINE_VERSION_PATTERN" "$state" > /dev/null || return 1
+    run_manifest_state_value WINE_SHA256 \
+        "$RUN_MANIFEST_WINE_SHA256_PATTERN" "$state" > /dev/null || return 1
+    run_manifest_state_value YABRIDGE_REF \
+        "$RUN_MANIFEST_YABRIDGE_REF_PATTERN" "$state" > /dev/null || return 1
+    run_manifest_state_value YABRIDGE_COMMIT \
+        "$RUN_MANIFEST_YABRIDGE_COMMIT_PATTERN" "$state" > /dev/null || return 1
 }
 
 write_run_manifest() {
@@ -481,13 +626,14 @@ write_run_manifest() {
     run_manifest_bridge_roots "$__run_manifest_bridge_home" || return 1
 
     __run_manifest_wine_version="$(run_manifest_state_value WINE_VERSION \
-        '^[A-Za-z0-9][A-Za-z0-9._+-]*$' "$__run_manifest_state")" || return 1
+        "$RUN_MANIFEST_WINE_VERSION_PATTERN" "$__run_manifest_state")" || return 1
     __run_manifest_wine_digest="$(run_manifest_state_value WINE_SHA256 \
-        '^[0-9a-fA-F]{64}$' "$__run_manifest_state")" || return 1
+        "$RUN_MANIFEST_WINE_SHA256_PATTERN" "$__run_manifest_state")" || return 1
     __run_manifest_yabridge_ref="$(run_manifest_state_value YABRIDGE_REF \
-        '^[A-Za-z0-9][A-Za-z0-9._/+@-]*$' "$__run_manifest_state")" || return 1
+        "$RUN_MANIFEST_YABRIDGE_REF_PATTERN" "$__run_manifest_state")" || return 1
     __run_manifest_yabridge_commit="$(run_manifest_state_value \
-        YABRIDGE_COMMIT '^[0-9a-fA-F]{40}$' "$__run_manifest_state")" || return 1
+        YABRIDGE_COMMIT "$RUN_MANIFEST_YABRIDGE_COMMIT_PATTERN" \
+        "$__run_manifest_state")" || return 1
 
     run_manifest_wine_identity "$__run_manifest_wine" \
         "$__run_manifest_wine_version" || return 1
@@ -539,15 +685,13 @@ run_manifest_encode() {
     local bridge_home="${12}"
     local daw="${13}"
     local bwrap="${14}"
-    local directory temporary clone_device clone_inode index
+    local directory temporary clone_device clone_inode clone_identity index
     local -a root_environment=()
 
     directory="$(dirname -- "$destination")"
-    if ! read -r clone_device clone_inode \
-        <<< "$(run_manifest_clone_identity "$clone")"; then
-        run_manifest_error "could not identify the prefix clone: $clone"
-        return 1
-    fi
+    clone_identity="$(run_manifest_identity "prefix clone" "$clone" \
+        run_manifest_clone_identity)" || return 1
+    read -r clone_device clone_inode <<< "$clone_identity"
     for index in "${!RUN_MANIFEST_BRIDGE_ROOT_PATHS[@]}"; do
         root_environment+=(
             "RUN_MANIFEST_JSON_BRIDGE_ROOT_$index=${RUN_MANIFEST_BRIDGE_ROOT_PATHS[index]}"

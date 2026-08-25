@@ -120,6 +120,26 @@ write_provenance() {
     > "$clone/.yabridge-staging-source"
 }
 
+# The mismatch diagnostic tells the reader their clone belongs to a different
+# prefix and walks them through verifying it. That advice is wrong when the real
+# problem is that the source could not be read at all, so the two must not share
+# a message.
+@test "clone validation separates an unreadable source identity from a mismatch" {
+  source "$PROJECT_ROOT/lib/clone-state.sh"
+  local clone="$FIXTURE_ROOT/prefix-copy"
+  make_prefix "$clone"
+  write_provenance "$clone" "$SOURCE"
+  local original_path="$PATH"
+
+  PATH="$(shadow_failing_command stat):$PATH"
+  run validate_clone_provenance "$clone" "$(realpath "$SOURCE")"
+  PATH="$original_path"
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"could not read the source prefix identity"* ]]
+  [[ "$output" != *"belongs to a different source prefix"* ]]
+}
+
 @test "launcher records canonical source provenance after a successful clone" {
   local canonical device inode
   canonical="$(realpath "$SOURCE")"

@@ -13,6 +13,9 @@ setup_project_fixture() {
   cp -R \
     "$PROJECT_ROOT/yabridge-test-infra/test-harness" \
     "$FIXTURE_ROOT/yabridge-test-infra/test-harness"
+  # The call log starts as an existing empty file on purpose: tests that refute
+  # a command was ever run are then asking about its contents, not about
+  # whether anything created the log at all.
   touch "$FIXTURE_ROOT/prefix/system.reg" "$CALLS"
   create_setup_fake_commands
 }
@@ -209,5 +212,5 @@ run_setup_fixture() {
     FAKE_ARCHIVE_SOURCE="${FAKE_ARCHIVE_SOURCE:-}" \
     FAKE_CRASH_DURING_ACTIVATION="${FAKE_CRASH_DURING_ACTIVATION:-false}" \
     FAKE_INTERRUPT_PHASE="${FAKE_INTERRUPT_PHASE:-}" \
-    "$FIXTURE_ROOT/setup.sh" "$@"
+    "${SETUP_INVOCATION_PATH:-$FIXTURE_ROOT/setup.sh}" "$@"
 }

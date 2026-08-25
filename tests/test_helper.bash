@@ -25,12 +25,72 @@ FIXTURE_YABRIDGE_COMMIT="48ea9749b682c48875366134a42073d6b3d0a8c4"
 # Bash exempts a command whose status is inverted with `!` from errexit, so a
 # bare `! grep ...` line inside a bats test can never fail the test. Absence
 # claims go through this helper instead, where the status is real.
+#
+# Exactly one status proves an absence: 1, meaning the command ran and did not
+# find what it was told to look for. Status 0 found it. Anything above 1 means
+# the command could not answer the question at all — a missing call log, an
+# unreadable input, a misspelled command name — and that is reported as a
+# failure with the status and the command's own stderr, because silently
+# treating "I could not look" as "it is not there" is how a suite ends up
+# proving nothing.
 refute() {
-  if "$@" > /dev/null 2>&1; then
-    printf 'expected to fail but succeeded: %s\n' "$*" >&2
+  local status=0
+  local stderr
+  stderr="$( { "$@" > /dev/null; } 2>&1 )" || status=$?
+
+  case "$status" in
+    0)
+      printf 'expected to fail but succeeded: %s\n' "$*" >&2
+      return 1
+      ;;
+    1) return 0 ;;
+    *)
+      printf 'command could not answer the absence it was asked about\n' >&2
+      printf '  command: %s\n' "$*" >&2
+      printf '  status: %s\n' "$status" >&2
+      if [[ -n "$stderr" ]]; then
+        printf '  stderr: %s\n' "$stderr" >&2
+      fi
+      return 1
+      ;;
+  esac
+}
+
+# One value out of the environment a fixture DAW recorded. The file exists only
+# if the DAW actually ran, and a missing key means it ran without that variable,
+# so both are reported rather than returned as an empty string. Suites rely on
+# these assertions as proof that a launch happened, and an absence assertion
+# about the same file is only meaningful once the file is known to be there.
+daw_env_value() {
+  local key="$1"
+  local line
+  if [[ ! -f "${DAW_ENV_FILE:?}" ]]; then
+    printf 'the fixture DAW recorded no environment at all: %s\n' \
+      "$DAW_ENV_FILE" >&2
     return 1
   fi
-  return 0
+  if ! line="$(grep -m1 -- "^$key=" "$DAW_ENV_FILE")"; then
+    printf 'the fixture DAW recorded no %s in %s\n' "$key" "$DAW_ENV_FILE" >&2
+    return 1
+  fi
+  printf '%s\n' "${line#"$key"=}"
+}
+
+# A command that always fails, on a directory meant to be prepended to PATH.
+# Lets a suite observe how the code under test handles a tool that cannot answer
+# — an encoder, a rename, a `stat` — without depending on file permissions,
+# which root would ignore anyway.
+shadow_failing_command() {
+  local name="$1"
+  local directory="$BATS_TEST_TMPDIR/broken-bin"
+  mkdir -p "$directory"
+  cat > "$directory/$name" <<'EOF'
+#!/bin/bash
+printf 'fixture: refusing to run\n' >&2
+exit 1
+EOF
+  chmod +x "$directory/$name"
+  printf '%s\n' "$directory"
 }
 
 run_setup() {
