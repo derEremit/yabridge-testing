@@ -164,33 +164,62 @@ for r in releases:
     else
         info "Downloading wine-staging (Kron4ek prebuilt)..."
         TARBALL="$BUILD/wine-${WINE_VER}-staging-amd64.tar.xz"
-        rm -rf "$WINE_DIR"
-        rm -f "$TARBALL"
+        WINE_CANDIDATE_ROOT="$(mktemp -d "$BUILD/.wine-candidate.XXXXXX")"
+        WINE_CANDIDATE_ARCHIVE="$WINE_CANDIDATE_ROOT/wine.tar.xz"
         info "Downloading $WINE_URL..."
-        curl -fsSL -o "$TARBALL" "$WINE_URL" || {
+        curl -fsSL -o "$WINE_CANDIDATE_ARCHIVE" "$WINE_URL" || {
+            rm -rf "$WINE_CANDIDATE_ROOT"
             err "Download failed. Try a different version."
             err "See: https://github.com/Kron4ek/Wine-Builds/releases"
             exit 1
         }
 
-        ACTUAL_WINE_SHA256="$(sha256sum "$TARBALL")"
+        ACTUAL_WINE_SHA256="$(sha256sum "$WINE_CANDIDATE_ARCHIVE")" || {
+            rm -rf "$WINE_CANDIDATE_ROOT"
+            err "Could not calculate Wine archive SHA-256"
+            exit 1
+        }
         ACTUAL_WINE_SHA256="${ACTUAL_WINE_SHA256%% *}"
         if [[ -n "$WINE_SHA256" && "$ACTUAL_WINE_SHA256" != "$WINE_SHA256" ]]; then
-            rm -f "$TARBALL"
+            rm -rf "$WINE_CANDIDATE_ROOT"
             err "Wine archive SHA-256 mismatch"
             exit 1
         fi
 
         info "Extracting wine-staging $WINE_VER..."
-        tar -xaf "$TARBALL" -C "$BUILD/"
-        # Extracts to build/wine-<ver>-staging-amd64/ — rename to build/wine
-        rm -rf "$WINE_DIR"  # remove empty dir created by mkdir -p
-        EXTRACTED_DIR=$(find "$BUILD" -maxdepth 1 -type d -name '*staging*' | head -1)
+        if ! tar -xaf "$WINE_CANDIDATE_ARCHIVE" -C "$WINE_CANDIDATE_ROOT/"; then
+            rm -rf "$WINE_CANDIDATE_ROOT"
+            err "Extraction failed"
+            exit 1
+        fi
+        EXTRACTED_DIR="$(find "$WINE_CANDIDATE_ROOT" -mindepth 1 -maxdepth 1 \
+            -type d -name '*staging*' -print -quit)"
         if [[ -z "$EXTRACTED_DIR" ]]; then
+            rm -rf "$WINE_CANDIDATE_ROOT"
             err "Extraction failed — could not find wine directory"
             exit 1
         fi
-        mv "$EXTRACTED_DIR" "$WINE_DIR"
+        if [[ ! -x "$EXTRACTED_DIR/bin/wine" ||
+            ! -x "$EXTRACTED_DIR/bin/wineboot" ||
+            ! -x "$EXTRACTED_DIR/bin/wineserver" ]] ||
+            ! "$EXTRACTED_DIR/bin/wine" --version >/dev/null 2>&1; then
+            rm -rf "$WINE_CANDIDATE_ROOT"
+            err "Extracted Wine candidate failed validation"
+            exit 1
+        fi
+
+        mv -f "$WINE_CANDIDATE_ARCHIVE" "$TARBALL"
+        WINE_BACKUP="$BUILD/.wine-previous.$$"
+        if [[ -e "$WINE_DIR" ]]; then
+            mv "$WINE_DIR" "$WINE_BACKUP"
+        fi
+        if ! mv "$EXTRACTED_DIR" "$WINE_DIR"; then
+            [[ ! -e "$WINE_BACKUP" ]] || mv "$WINE_BACKUP" "$WINE_DIR"
+            rm -rf "$WINE_CANDIDATE_ROOT"
+            err "Could not activate Wine candidate"
+            exit 1
+        fi
+        rm -rf "$WINE_BACKUP" "$WINE_CANDIDATE_ROOT"
         ok "Wine-staging $WINE_VER extracted to $WINE_DIR"
 
         STATE_WINE_VERSION="$WINE_VER"

@@ -3,6 +3,8 @@
 load test_helper
 
 WINE_11_8_SHA="6c6f642b0954248493ebbd86ec232c46a6b9cf97c747ab3f1bcb707a22efed1d"
+OLD_WINE_SHA="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+WRONG_WINE_SHA="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 YABRIDGE_COMMIT="48ea9749b682c48875366134a42073d6b3d0a8c4"
 
 setup() {
@@ -25,6 +27,7 @@ EOF
   cat > "$FAKE_BIN/curl" <<'EOF'
 #!/bin/bash
 printf 'curl %s\n' "$*" >> "$CALLS"
+[[ "$FAKE_CURL_FAIL" == true ]] && exit 22
 while [[ $# -gt 0 ]]; do
   if [[ "$1" == "-o" ]]; then
     printf 'fake archive\n' > "$2"
@@ -42,6 +45,7 @@ EOF
   cat > "$FAKE_BIN/tar" <<'EOF'
 #!/bin/bash
 printf 'tar %s\n' "$*" >> "$CALLS"
+[[ "$FAKE_TAR_FAIL" == true ]] && exit 1
 while [[ $# -gt 0 ]]; do
   if [[ "$1" == "-C" ]]; then
     build="$2"
@@ -52,7 +56,11 @@ done
 wine="$build/wine-11.8-staging-amd64"
 mkdir -p "$wine/bin"
 for command in wine wineboot wineserver; do
-  printf '#!/bin/bash\nexit 0\n' > "$wine/bin/$command"
+  if [[ "$command" == wine && "$FAKE_CANDIDATE_INVALID" == true ]]; then
+    printf '#!/bin/bash\nexit 1\n' > "$wine/bin/$command"
+  else
+    printf '#!/bin/bash\nexit 0\n' > "$wine/bin/$command"
+  fi
   chmod +x "$wine/bin/$command"
 done
 EOF
@@ -103,6 +111,18 @@ seed_wine_cache() {
     printf '#!/bin/bash\nexit 0\n' > "$FIXTURE/build/wine/bin/$command"
     chmod +x "$FIXTURE/build/wine/bin/$command"
   done
+  touch "$FIXTURE/build/wine/prior-install"
+}
+
+seed_wine_state() {
+  printf 'WINE_VERSION=11.8\nWINE_SHA256=%s\n' "$OLD_WINE_SHA" \
+    > "$FIXTURE/build/component-state.env"
+}
+
+assert_prior_wine_preserved() {
+  [ -x "$FIXTURE/build/wine/bin/wine" ]
+  [ -f "$FIXTURE/build/wine/prior-install" ]
+  grep -q "WINE_SHA256=$OLD_WINE_SHA" "$FIXTURE/build/component-state.env"
 }
 
 seed_yabridge_cache() {
@@ -115,7 +135,10 @@ run_setup_fixture() {
   run env \
     PATH="$FAKE_BIN:$PATH" \
     CALLS="$CALLS" \
-    FAKE_SHA="$WINE_11_8_SHA" \
+    FAKE_SHA="${FAKE_SHA_VALUE:-$WINE_11_8_SHA}" \
+    FAKE_CURL_FAIL="${FAKE_CURL_FAIL:-false}" \
+    FAKE_TAR_FAIL="${FAKE_TAR_FAIL:-false}" \
+    FAKE_CANDIDATE_INVALID="${FAKE_CANDIDATE_INVALID:-false}" \
     FAKE_YABRIDGE_FETCH_COMMIT="${FAKE_YABRIDGE_FETCH_COMMIT:-$YABRIDGE_COMMIT}" \
     FAKE_YABRIDGE_HEAD_COMMIT="${FAKE_YABRIDGE_HEAD_COMMIT:-$YABRIDGE_COMMIT}" \
     "$FIXTURE/setup.sh" "$@"
@@ -136,6 +159,63 @@ run_setup_fixture() {
 
   [ "$status" -eq 0 ]
   grep -q "curl .*wine-11.8-staging-amd64.tar.xz" "$CALLS"
+}
+
+@test "different requested digest refreshes the same Wine version" {
+  seed_wine_cache
+  seed_wine_state
+
+  run_setup_fixture --no-yabridge --wine-version 11.8 --wine-sha256 "$WINE_11_8_SHA"
+
+  [ "$status" -eq 0 ]
+  grep -q "curl .*wine-11.8-staging-amd64.tar.xz" "$CALLS"
+  grep -q "WINE_SHA256=$WINE_11_8_SHA" "$FIXTURE/build/component-state.env"
+  [ ! -e "$FIXTURE/build/wine/prior-install" ]
+}
+
+@test "wrong downloaded digest is rejected without replacing Wine" {
+  seed_wine_cache
+  seed_wine_state
+  FAKE_SHA_VALUE="$WRONG_WINE_SHA"
+
+  run_setup_fixture --no-yabridge --wine-version 11.8 --wine-sha256 "$WINE_11_8_SHA"
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"Wine archive SHA-256 mismatch"* ]]
+  assert_prior_wine_preserved
+}
+
+@test "Wine download failure preserves the existing installation" {
+  seed_wine_cache
+  seed_wine_state
+  FAKE_CURL_FAIL=true
+
+  run_setup_fixture --no-yabridge --wine-version 11.8 --wine-sha256 "$WINE_11_8_SHA"
+
+  [ "$status" -eq 1 ]
+  assert_prior_wine_preserved
+}
+
+@test "Wine extraction failure preserves the existing installation" {
+  seed_wine_cache
+  seed_wine_state
+  FAKE_TAR_FAIL=true
+
+  run_setup_fixture --no-yabridge --wine-version 11.8 --wine-sha256 "$WINE_11_8_SHA"
+
+  [ "$status" -eq 1 ]
+  assert_prior_wine_preserved
+}
+
+@test "invalid Wine candidate preserves the existing installation" {
+  seed_wine_cache
+  seed_wine_state
+  FAKE_CANDIDATE_INVALID=true
+
+  run_setup_fixture --no-yabridge --wine-version 11.8 --wine-sha256 "$WINE_11_8_SHA"
+
+  [ "$status" -eq 1 ]
+  assert_prior_wine_preserved
 }
 
 @test "different yabridge ref fetches and rebuilds" {
