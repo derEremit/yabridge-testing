@@ -308,7 +308,7 @@ run_setup_fixture() {
   grep -Fq "$canonical/build/wine/bin/wine" "$FIXTURE/env.sh"
   grep -Fq "$canonical/build/yabridge" "$FIXTURE/env.sh"
   refute grep -Fq "$link" "$FIXTURE/env.sh"
-  refute grep -Fq "$link" "$FIXTURE/test.sh"
+  grep -Fq 'pwd -P' "$FIXTURE/test.sh"
 }
 
 @test "generated environment leaves Wine diagnostics to the caller" {
@@ -325,7 +325,7 @@ EOF
   [ "$status" -eq 0 ]
   [ -f "$FIXTURE/env.sh" ]
   refute grep -Eq '^[[:space:]]*(export[[:space:]]+)?WINEDEBUG=' "$FIXTURE/env.sh"
-  run bash -c "source '$FIXTURE/env.sh' > /dev/null 2>&1
+  run env -u WINEDEBUG bash -c "source '$FIXTURE/env.sh' > /dev/null 2>&1
 printf 'WINEDEBUG=%s\n' \"\${WINEDEBUG-<unset>}\""
   [ "$output" = "WINEDEBUG=<unset>" ]
   [ "$(cat "$BATS_TEST_TMPDIR/wineboot.env")" = "WINEDEBUG=-all" ]
