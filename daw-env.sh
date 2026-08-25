@@ -40,11 +40,24 @@ COPY="$ROOT/prefix-copy"
 REAL_PREFIX="$HOME/.audio-production/winplugins"
 FRESH=false
 
+require_option_value() {
+    local option="$1"
+    local value="${2:-}"
+    if [[ -z "$value" ]]; then
+        echo "Error: $option requires a value" >&2
+        exit 2
+    fi
+}
+
 # ── Parse options ────────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --fresh)   FRESH=true; shift ;;
-        --prefix)  REAL_PREFIX="$2"; shift 2 ;;
+        --prefix)
+            require_option_value "--prefix" "${2:-}"
+            REAL_PREFIX="$2"
+            shift 2
+            ;;
         --clean)   echo "Removing $COPY..."; rm -rf "$COPY"; echo "Done."; exit 0 ;;
         -h|--help)
             sed -n '2,33p' "$0" | sed 's/^# \?//'

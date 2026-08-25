@@ -17,12 +17,22 @@ ok()    { echo -e "${GREEN}[✓]${NC} $1"; }
 err()   { echo -e "${RED}[✗]${NC} $1"; }
 
 usage() {
+    local status="${1:-1}"
     echo "Usage: $0 [--wine-version VERSION] [--yabridge-branch BRANCH] [--no-wine] [--no-yabridge]"
     echo "  --wine-version       Wine version to download (default: latest-staging)"
     echo "  --yabridge-branch    Yabridge git branch/ref (default: master)"
     echo "  --no-wine            Skip wine setup (use system wine)"
     echo "  --no-yabridge        Skip yabridge build"
-    exit 1
+    exit "$status"
+}
+
+require_option_value() {
+    local option="$1"
+    local value="${2:-}"
+    if [[ -z "$value" ]]; then
+        err "$option requires a value"
+        exit 2
+    fi
 }
 
 WINE_VERSION="latest-staging"
@@ -32,11 +42,19 @@ SKIP_YABRIDGE=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --wine-version)    WINE_VERSION="$2"; shift 2 ;;
-        --yabridge-branch) YABRIDGE_BRANCH="$2"; shift 2 ;;
+        --wine-version)
+            require_option_value "--wine-version" "${2:-}"
+            WINE_VERSION="$2"
+            shift 2
+            ;;
+        --yabridge-branch)
+            require_option_value "--yabridge-branch" "${2:-}"
+            YABRIDGE_BRANCH="$2"
+            shift 2
+            ;;
         --no-wine)         SKIP_WINE=true; shift ;;
         --no-yabridge)     SKIP_YABRIDGE=true; shift ;;
-        -h|--help)         usage ;;
+        -h|--help)         usage 0 ;;
         *)                 err "Unknown option: $1"; usage ;;
     esac
 done
