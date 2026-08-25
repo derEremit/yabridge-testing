@@ -12,6 +12,8 @@ test.sh
 # Local editor and project metadata
 .claude/
 .index.yaml
+.superpowers/
+.worktrees/
 
 # Machine-specific investigation log
 AUDIT-LOG.md
