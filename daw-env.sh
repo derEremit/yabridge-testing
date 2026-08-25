@@ -43,7 +43,7 @@ FRESH=false
 require_option_value() {
     local option="$1"
     local value="${2:-}"
-    if [[ -z "$value" ]]; then
+    if [[ -z "$value" || "$value" == -* ]]; then
         echo "Error: $option requires a value" >&2
         exit 2
     fi

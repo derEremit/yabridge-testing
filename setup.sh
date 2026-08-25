@@ -29,7 +29,7 @@ usage() {
 require_option_value() {
     local option="$1"
     local value="${2:-}"
-    if [[ -z "$value" ]]; then
+    if [[ -z "$value" || "$value" == -* ]]; then
         err "$option requires a value"
         exit 2
     fi
