@@ -36,12 +36,10 @@ setup() {
 
   cp "$PROJECT_ROOT/daw-env.sh" "$FIXTURE_ROOT/daw-env.sh"
   chmod +x "$FIXTURE_ROOT/daw-env.sh"
-  local helper
-  for helper in clone-state.sh isolated-bridges.sh sandbox.sh; do
-    if [[ -f "$PROJECT_ROOT/lib/$helper" ]]; then
-      cp "$PROJECT_ROOT/lib/$helper" "$FIXTURE_ROOT/lib/$helper"
-    fi
-  done
+  copy_launcher_libraries "$FIXTURE_ROOT/lib"
+  # A launch records the components it used, so the identities setup.sh writes
+  # are part of a working fixture project.
+  seed_component_state_file "$FIXTURE_ROOT/build/component-state.env"
 
   cat > "$FIXTURE_ROOT/env.sh" <<EOF
 export WINELOADER="$FIXTURE_BIN/wine"
@@ -1148,7 +1146,7 @@ $BATS_TEST_TMPDIR"
   [[ "$(launched_argv)" == *" --bind $COPY $COPY "* ]]
   [ "$(daw_env_value HOME)" = "$ISOLATED_HOME" ]
   [ "$(daw_env_value VST_PATH)" = "$ISOLATED_HOME/.vst/yabridge" ]
-  ! grep -Fq "$PRODUCTION_HOME/.vst/yabridge" "$DAW_ENV_FILE"
+  refute grep -Fq "$PRODUCTION_HOME/.vst/yabridge" "$DAW_ENV_FILE"
 }
 
 @test "launcher unshares the network unless the option is explicit" {

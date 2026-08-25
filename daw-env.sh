@@ -28,6 +28,11 @@
 #     writable. The sandbox gets a fresh network namespace unless you pass
 #     --network. If Bubblewrap or the namespaces it needs are unavailable the
 #     launcher refuses to start the DAW.
+#   - Every run records what it actually is in isolation/run-manifest.json:
+#     source and clone identity, Wine and yabridge versions, bridge roots, the
+#     DAW, the sandbox boundary and the Wine diagnostics state. The manifest is
+#     written after every check has passed and before the DAW starts. If it
+#     cannot be written, the DAW does not run.
 #
 # The clone persists between runs (so the one-time wine upgrade isn't repeated
 # and plugin state survives). Use --fresh to re-clone, --clean to delete it.
@@ -64,6 +69,12 @@
 #   --network                  give the DAW host network access. Off by
 #                              default: the sandbox gets its own empty network
 #                              namespace.
+#
+# Wine diagnostics options:
+#   --quiet-wine               set WINEDEBUG=-all for the DAW. Off by default:
+#                              Wine's own diagnostics are left exactly as your
+#                              shell configured them, and nothing is invented
+#                              when your shell configured nothing.
 
 set -euo pipefail
 
@@ -79,14 +90,26 @@ NATIVE_PLUGIN_PATHS=()
 REQUESTED_WRITABLE_PATHS=()
 LAUNCH_COMMAND=()
 
+# Wine's own diagnostics belong to the caller, so what the calling shell asked
+# for is captured before anything this project generates can overwrite it.
+INHERITED_WINEDEBUG_SET=false
+INHERITED_WINEDEBUG=""
+if [[ -n "${WINEDEBUG+set}" ]]; then
+    INHERITED_WINEDEBUG_SET=true
+    INHERITED_WINEDEBUG="$WINEDEBUG"
+fi
+
+source "$ROOT/lib/component-state.sh"
 source "$ROOT/lib/clone-state.sh"
 source "$ROOT/lib/isolated-bridges.sh"
 source "$ROOT/lib/sandbox.sh"
+source "$ROOT/lib/run-manifest.sh"
 
-# Host networking must come from --network on this command line and nowhere
-# else, so an exported SANDBOX_NETWORK in the calling shell cannot quietly
-# decide it. Reset after sourcing, before a single option is read.
+# Host networking and quiet diagnostics must come from this command line and
+# nowhere else, so exported values in the calling shell cannot quietly decide
+# them. Reset after sourcing, before a single option is read.
 SANDBOX_NETWORK=false
+QUIET_WINE=false
 
 daw_env_cleanup() {
     local status=$?
@@ -123,6 +146,7 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --network) SANDBOX_NETWORK=true; shift ;;
+        --quiet-wine) QUIET_WINE=true; shift ;;
         --writable-path)
             require_option_value "--writable-path" "${2:-}"
             REQUESTED_WRITABLE_PATHS+=("$2")
@@ -130,7 +154,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --clean)   CLEAN=true; shift ;;
         -h|--help)
-            sed -n '2,66p' "$0" | sed 's/^# \?//'
+            # The header block, printed to its own end rather than to a line
+            # number, so documenting a new option cannot truncate the help.
+            awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' \
+                "$0"
             exit 0 ;;
         --) shift; break ;;
         -*) echo "Unknown option: $1" >&2; exit 1 ;;
@@ -142,8 +169,8 @@ export YABRIDGE_STAGING_REFRESH_BRIDGES="$REFRESH_BRIDGES"
 DAW="${1:-}"
 if [[ "$CLEAN" != true && -z "$DAW" ]]; then
     echo "Usage: $0 [--fresh] [--refresh-bridges] [--allow-empty] [--network]"
-    echo "          [--native-plugin-path DIR]... [--writable-path DIR]..."
-    echo "          [--prefix DIR] <daw-binary> [args...]"
+    echo "          [--quiet-wine] [--native-plugin-path DIR]..."
+    echo "          [--writable-path DIR]... [--prefix DIR] <daw-binary> [args...]"
     echo "       $0 --clean"
     exit 1
 fi
@@ -230,6 +257,19 @@ fi
 source "$ROOT/env.sh"
 export WINEPREFIX="$COPY"
 
+# ── Wine diagnostics ─────────────────────────────────────────────────────────
+# Only --quiet-wine silences Wine. Otherwise the value the calling shell set is
+# restored exactly as it was given, and when it set nothing the variable is left
+# unset rather than being invented here — including when an env.sh generated
+# before this rule silenced it.
+if [[ "$QUIET_WINE" == true ]]; then
+    export WINEDEBUG=-all
+elif [[ "$INHERITED_WINEDEBUG_SET" == true ]]; then
+    export WINEDEBUG="$INHERITED_WINEDEBUG"
+else
+    unset WINEDEBUG
+fi
+
 # ── Safety assertion: WINEPREFIX must be the clone, never a real prefix ───────
 WP_REAL="$(realpath "$WINEPREFIX")"
 if [[ "$WP_REAL" != "$(realpath "$COPY")" ]]; then
@@ -280,6 +320,36 @@ SANDBOX_ISOLATED_HOME="$ISOLATED_BRIDGE_HOME"
 SANDBOX_NATIVE_PLUGIN_PATHS=(${NATIVE_PLUGIN_PATHS[@]+"${NATIVE_PLUGIN_PATHS[@]}"})
 build_bwrap_command LAUNCH_COMMAND "$SANDBOX_DAW_PATH" "$@" || exit 1
 
+# ── Record what this run actually is ─────────────────────────────────────────
+# Written after the clone, the bridges and the finished sandbox command have all
+# been validated, and before the DAW can change any of it. Every identity is
+# proven again while the manifest is written, and the sandbox command itself is
+# checked against the boundary the manifest claims, so a run that cannot be
+# described accurately is a run that does not start.
+RUN_MANIFEST_SOURCE="$REAL_PREFIX"
+RUN_MANIFEST_CLONE="$COPY"
+RUN_MANIFEST_CLONE_IDENTITY="$VALIDATED_CLONE_IDENTITY"
+RUN_MANIFEST_STATE_FILE="$ROOT/build/component-state.env"
+RUN_MANIFEST_WINE_EXECUTABLE="${WINELOADER:-}"
+RUN_MANIFEST_YABRIDGE_HOME="$YABRIDGE_HOME"
+RUN_MANIFEST_YABRIDGECTL="$YABRIDGECTL"
+RUN_MANIFEST_BRIDGE_HOME="$ISOLATED_BRIDGE_HOME"
+RUN_MANIFEST_DAW="$SANDBOX_DAW_PATH"
+RUN_MANIFEST_BWRAP="$SANDBOX_BWRAP"
+RUN_MANIFEST_NAMESPACES_VERIFIED="$SANDBOX_NAMESPACES_VERIFIED"
+RUN_MANIFEST_UNSHARE_USER="$SANDBOX_UNSHARE_USER"
+RUN_MANIFEST_NETWORK="$SANDBOX_NETWORK"
+RUN_MANIFEST_QUIET_WINE="$QUIET_WINE"
+if [[ -n "${WINEDEBUG+set}" ]]; then
+    RUN_MANIFEST_WINEDEBUG_SET=true
+    RUN_MANIFEST_WINEDEBUG="$WINEDEBUG"
+else
+    RUN_MANIFEST_WINEDEBUG_SET=false
+    RUN_MANIFEST_WINEDEBUG=""
+fi
+RUN_MANIFEST_FILE="$SANDBOX_ISOLATION/$RUN_MANIFEST_NAME"
+write_run_manifest "$RUN_MANIFEST_FILE" LAUNCH_COMMAND || exit 1
+
 # ── Launch ───────────────────────────────────────────────────────────────────
 if [[ "$SANDBOX_NETWORK" == true ]]; then
     network_status="host network (--network)"
@@ -296,6 +366,9 @@ echo "  VST3_PATH:   $VST3_PATH"
 echo "  CLAP_PATH:   $CLAP_PATH"
 echo "  sandbox:     $SANDBOX_BWRAP (user namespace: $SANDBOX_UNSHARE_USER)"
 echo "  network:     $network_status"
+echo "  WINEDEBUG:   ${WINEDEBUG-<unset>}$([[ "$QUIET_WINE" == true ]] &&
+    echo ' (--quiet-wine)')"
+echo "  manifest:    $RUN_MANIFEST_FILE"
 echo "  writable:    $COPY, $SANDBOX_ISOLATION${SANDBOX_WRITABLE_PATHS[*]+, ${SANDBOX_WRITABLE_PATHS[*]}}"
 echo "  Production prefix and plugin roots are mounted read-only."
 echo "  Bridges resolve only inside the clone; production bridges are not used."

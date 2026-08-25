@@ -28,11 +28,10 @@ setup() {
 
   cp "$PROJECT_ROOT/daw-env.sh" "$FIXTURE_ROOT/daw-env.sh"
   chmod +x "$FIXTURE_ROOT/daw-env.sh"
-  for helper in clone-state.sh isolated-bridges.sh sandbox.sh; do
-    if [[ -f "$PROJECT_ROOT/lib/$helper" ]]; then
-      cp "$PROJECT_ROOT/lib/$helper" "$FIXTURE_ROOT/lib/$helper"
-    fi
-  done
+  copy_launcher_libraries "$FIXTURE_ROOT/lib"
+  # A launch records the components it used, so the identities setup.sh writes
+  # are part of a working fixture project.
+  seed_component_state_file "$FIXTURE_ROOT/build/component-state.env"
 
   cat > "$FIXTURE_ROOT/env.sh" <<EOF
 export WINELOADER="$FIXTURE_BIN/wine"
@@ -214,7 +213,7 @@ sync_call_count() {
   grep -Fxq "add $(realpath -e -- "$COPY")" "$CALLS"
   grep -Fxq "sync --force --prune" "$CALLS"
   [ "$(grep -c '^add ' "$CALLS")" -eq 1 ]
-  ! grep -Fq "$SOURCE" "$CALLS"
+  refute grep -Fq "$SOURCE" "$CALLS"
 }
 
 @test "bridge generation accepts generated targets inside the clone" {
@@ -229,7 +228,7 @@ sync_call_count() {
   [ -L "$ISOLATED_HOME/.clap/yabridge/Good.clap-win" ]
   [ -L "$ISOLATED_HOME/.vst3/yabridge/Good.vst3/Contents/x86_64-win/Good.vst3" ]
   [ -f "$ISOLATION/.yabridge-staging-bridges" ]
-  ! compgen -G "$FIXTURE_ROOT/isolation.new.*" >/dev/null
+  refute compgen -G "$FIXTURE_ROOT/isolation.new.*"
 }
 
 # ── Canonical fail-closed metadata validation ────────────────────────────────
@@ -248,7 +247,7 @@ HOOK
   [ "$status" -ne 0 ]
   [[ "$output" == *"escapes the plugin clone"* ]]
   [ ! -e "$ISOLATION" ]
-  ! compgen -G "$FIXTURE_ROOT/isolation.new.*" >/dev/null
+  refute compgen -G "$FIXTURE_ROOT/isolation.new.*"
   [ -f "$OUTSIDE/Evil.dll" ]
 }
 
@@ -427,7 +426,7 @@ HOOK
   [[ "$output" == *"/home/.vst"* ]]
   [[ "$output" != *"/home/.vst/yabridge"* ]]
   [ ! -e "$ISOLATION" ]
-  ! compgen -G "$FIXTURE_ROOT/isolation.new.*" >/dev/null
+  refute compgen -G "$FIXTURE_ROOT/isolation.new.*"
 }
 
 @test "bridge validation fails closed when a bridge root cannot be traversed" {
@@ -449,8 +448,8 @@ EOF
   [ "$status" -ne 0 ]
   [[ "$output" == *"could not traverse the isolated bridge root"* ]]
   [ ! -e "$ISOLATION" ]
-  ! compgen -G "$FIXTURE_ROOT/isolation.new.*" >/dev/null
-  ! compgen -G "$TMPDIR/yabridge-bridge-scan.*" >/dev/null
+  refute compgen -G "$FIXTURE_ROOT/isolation.new.*"
+  refute compgen -G "$TMPDIR/yabridge-bridge-scan.*"
 }
 
 @test "bridge validation classifies Windows metadata case-insensitively" {
@@ -583,7 +582,7 @@ HOOK
   [ "$(sync_call_count)" -eq 2 ]
   [ ! -e "$ISOLATED_HOME/.vst/yabridge/stale-marker" ]
   [ -L "$ISOLATED_HOME/.vst/yabridge/Good.dll" ]
-  ! compgen -G "$FIXTURE_ROOT/isolation.new.*" >/dev/null
+  refute compgen -G "$FIXTURE_ROOT/isolation.new.*"
 }
 
 @test "failed refresh preserves the existing isolated bridge tree" {
@@ -601,7 +600,7 @@ HOOK
   [ "$status" -ne 0 ]
   [ "$(cat "$ISOLATED_HOME/.vst/yabridge/existing")" = "keep me" ]
   [ -f "$ISOLATION/.yabridge-staging-bridges" ]
-  ! compgen -G "$FIXTURE_ROOT/isolation.new.*" >/dev/null
+  refute compgen -G "$FIXTURE_ROOT/isolation.new.*"
 }
 
 @test "stale reused bridge state names refresh-bridges as the recovery" {
@@ -672,7 +671,7 @@ HOOK
   [[ "$output" == *"escapes the plugin clone"* ]]
   [ "$(cat "$ISOLATED_HOME/.vst/yabridge/existing")" = "keep me" ]
   [ ! -e "$ISOLATED_HOME/.vst/yabridge/Evil.dll" ]
-  ! compgen -G "$FIXTURE_ROOT/isolation.new.*" >/dev/null
+  refute compgen -G "$FIXTURE_ROOT/isolation.new.*"
 }
 
 # ── Invocation-owned state and fail-closed cleanup ───────────────────────────
@@ -785,7 +784,7 @@ HOOK
   [ "$(daw_env_value VST_PATH)" = "$ISOLATED_HOME/.vst/yabridge" ]
   [ "$(daw_env_value VST3_PATH)" = "$ISOLATED_HOME/.vst3/yabridge" ]
   [ "$(daw_env_value CLAP_PATH)" = "$ISOLATED_HOME/.clap/yabridge" ]
-  ! grep -Fq 'nonexistent-production' "$DAW_ENV_FILE"
+  refute grep -Fq 'nonexistent-production' "$DAW_ENV_FILE"
 }
 
 @test "launcher appends only explicitly supplied native plugin paths" {

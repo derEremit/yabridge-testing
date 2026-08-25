@@ -39,9 +39,13 @@ isolation. No system files are touched — everything lives in `build/`,
 │   │   ├── libyabridge-chainloader-*.so
 │   │   ├── yabridge-host.exe        # wrapper script
 │   │   └── yabridge-host.exe.so     # actual winelib binary
-│   └── yabridge-src/  # git clone (kept for rebuilding)
+│   ├── yabridge-src/  # git clone (kept for rebuilding)
+│   └── component-state.env  # recorded wine + yabridge identities
 ├── prefix/           # isolated WINEPREFIX (created by setup.sh)
 ├── prefix-copy/      # COW clone of your real prefix (created by daw-env.sh)
+├── isolation/        # isolated HOME/XDG + bridges (created by daw-env.sh)
+│   ├── home/         # generated bridges, on VST_PATH/VST3_PATH/CLAP_PATH
+│   └── run-manifest.json  # what the last launch actually was
 └── yabridge-test-infra/
     └── test-harness/  # Python test harness CLI
 ```
@@ -119,6 +123,9 @@ refuses to start your DAW rather than running it unsandboxed.
 
 # Give the DAW host network access (off by default)
 ./daw-env.sh --network bitwig-studio
+
+# Silence Wine's own diagnostics (kept by default)
+./daw-env.sh --quiet-wine reaper
 ```
 
 **What happens:**
@@ -131,8 +138,10 @@ refuses to start your DAW rather than running it unsandboxed.
    `WINEPREFIX` → `prefix-copy/`.
 4. Generates yabridge bridges inside `isolation/home/`, an isolated HOME/XDG
    tree that only references the clone.
-5. Builds a Bubblewrap argv array and `exec`s it. Your DAW arguments are passed
-   through unchanged — no shell re-parses them.
+5. Builds a Bubblewrap argv array, then re-checks every identity the run
+   depends on and records it in `isolation/run-manifest.json`.
+6. `exec`s the sandbox. Your DAW arguments are passed through unchanged — no
+   shell re-parses them.
 
 **Why this is safe:** yabridge's `find_wine_prefix()` checks `WINEPREFIX`
 first and uses it as an override for *every* plugin, so no plugin resolves
@@ -207,6 +216,107 @@ run, so save projects and renders into a path you approved.
 
 All of these happen *before* the prefix is cloned, before `yabridgectl` runs
 and before the DAW starts.
+
+### The run manifest
+
+A sandbox is only worth as much as your ability to say what ran inside it.
+Before the DAW starts — and after every other check has passed — the launcher
+writes `isolation/run-manifest.json`, the record of what the run *actually*
+was:
+
+```json
+{
+  "bridge_home": "/home/you/yabridge-staging/isolation/home",
+  "bridge_roots": [
+    "/home/you/yabridge-staging/isolation/home/.vst/yabridge",
+    "/home/you/yabridge-staging/isolation/home/.vst3/yabridge",
+    "/home/you/yabridge-staging/isolation/home/.clap/yabridge"
+  ],
+  "clone_device": 66308,
+  "clone_inode": 8412737,
+  "clone_path": "/home/you/yabridge-staging/prefix-copy",
+  "daw_executable": "/usr/bin/reaper",
+  "generated_at": "2026-08-25T18:24:07Z",
+  "sandbox": {
+    "bwrap": "/usr/bin/bwrap",
+    "enabled": true,
+    "namespace_mode": "user",
+    "network": false
+  },
+  "schema_version": 1,
+  "source_device": 66308,
+  "source_inode": 8409281,
+  "source_path": "/home/you/.audio-production/winplugins",
+  "wine_diagnostics": {
+    "quiet": false,
+    "winedebug": null
+  },
+  "wine_executable": "/home/you/yabridge-staging/build/wine/bin/wine",
+  "wine_installed_version": "11.8",
+  "wine_requested_version": "11.8",
+  "wine_sha256": "6c6f642b0954248493ebbd86ec232c46a6b9cf97c747ab3f1bcb707a22efed1d",
+  "wine_version_string": "wine-11.8 (Staging)",
+  "yabridge_commit": "48ea9749b682c48875366134a42073d6b3d0a8c4",
+  "yabridge_home": "/home/you/yabridge-staging/build/yabridge",
+  "yabridge_requested_ref": "master",
+  "yabridgectl_path": "/home/you/yabridge-staging/build/yabridge/yabridgectl"
+}
+```
+
+Keys are sorted and the file always ends with a newline, so two runs are easy to
+`diff`. `namespace_mode` is `user` or `setuid` — whichever the sandbox command
+that was actually verified uses.
+
+Every value is re-derived at write time rather than copied from what an earlier
+phase believed:
+
+- the source device and inode come from the clone's own provenance record, and
+  the recorded path must still be that exact filesystem object;
+- the clone must still be the directory that was validated earlier in the run —
+  a clone swapped after validation is refused;
+- the Wine executable is asked for its version again, and it must match the
+  version `setup.sh` recorded in `build/component-state.env`;
+- component state is *parsed*, never sourced, so nothing in that file can run
+  as shell code;
+- the bridge roots must canonicalize inside `isolation/`;
+- the sandbox fields are read out of the finished `bwrap` argv, so
+  `network: false` means that command really does unshare the network. An
+  inherited environment variable cannot claim otherwise.
+
+The document is built by a short embedded Python encoder that receives each
+value as an environment variable — no shell text is ever interpolated into
+JSON — writes a private sibling temporary, flushes and `fsync`s it, and
+atomically renames it over the old manifest. So the file is always a complete
+document: either the new one or the one before it. A symlinked
+`run-manifest.json` is refused rather than followed, and a failed write removes
+only the temporary this invocation created.
+
+**If the manifest cannot be written, the DAW does not start.** That is
+deliberate: a run nobody can identify afterwards is exactly the run you will
+want to identify. The error names the field that could not be proven, and the
+manifest from your previous launch is left intact.
+
+### Wine diagnostics
+
+Wine's warnings and crash traces are how you find out why a plugin failed, so
+nothing here silences them for you. `setup.sh` no longer writes
+`WINEDEBUG=-all` into `env.sh`, and the launcher invents no value of its own:
+
+| You run | The DAW gets |
+|---|---|
+| `./daw-env.sh reaper` | `WINEDEBUG` unset — Wine's defaults |
+| `WINEDEBUG=+relay ./daw-env.sh reaper` | `WINEDEBUG=+relay`, exactly as you set it |
+| `./daw-env.sh --quiet-wine reaper` | `WINEDEBUG=-all` |
+| `WINEDEBUG=+relay ./daw-env.sh --quiet-wine reaper` | `WINEDEBUG=-all` — the option wins |
+
+The manifest records both facts separately: `quiet` is true only when you
+passed `--quiet-wine`, and `winedebug` is the value the DAW actually received
+(`null` when unset). Exporting `WINEDEBUG=-all` yourself therefore shows up as
+an inherited setting, not as the option — an inherited variable cannot
+impersonate a command-line decision.
+
+Setup still runs its own one-off `wineboot` quietly, because that output is
+noise from a step you did not ask about.
 
 **Notes:**
 - The clone persists between runs (so the one-time wine upgrade isn't
@@ -335,6 +445,11 @@ Build deps checked on pacman-based distros. On other distros, ensure you have:
 Generated by `setup.sh`. Contains absolute paths. Sourced by `test.sh` and
 `daw-env.sh`. Listed in `.gitignore` — regenerate with `./setup.sh --no-wine --no-yabridge`.
 
+It deliberately does not set `WINEDEBUG`: Wine's diagnostics belong to whoever
+launches Wine. `daw-env.sh` applies its own diagnostics policy *after* sourcing
+`env.sh`, so an older generated `env.sh` that still exports `WINEDEBUG=-all`
+cannot silence your DAW — but regenerate it anyway if you source it by hand.
+
 ### `test.sh`
 
 Wrapper around the exact
@@ -356,12 +471,17 @@ Flags: `--fresh` (re-clone), `--clean` (delete clone), `--prefix DIR` (clone a
 different prefix), `--native-plugin-path DIR` (expose a native plugin
 directory read-only, repeatable), `--writable-path DIR` (make one directory
 writable inside the sandbox, repeatable), `--network` (give the DAW host
-networking instead of an empty network namespace).
+networking instead of an empty network namespace), `--quiet-wine` (set
+`WINEDEBUG=-all` for the DAW instead of leaving diagnostics alone).
 
 `bwrap` and the namespaces it needs are checked before the prefix is cloned
 and before any bridge is generated, so an unusable sandbox costs you nothing
 and never falls back to an unsandboxed launch. See
 [The sandbox boundary](#the-sandbox-boundary) for the full mount table.
+
+Every launch records its exact identity in `isolation/run-manifest.json` after
+the last check passes and before the DAW starts; if it cannot be recorded, the
+DAW does not run. See [The run manifest](#the-run-manifest).
 
 ## Troubleshooting
 
@@ -427,6 +547,24 @@ this project tree.
 exist on the host. Check `DISPLAY`, `WAYLAND_DISPLAY`, `XAUTHORITY` and
 `XDG_RUNTIME_DIR` are set in the shell you launch from — the sandbox binds the
 specific socket those variables name, and nothing else.
+
+### The launcher refuses because it cannot record the run
+
+Messages like `Error: run manifest: …` mean an identity the manifest must
+record could not be proven — most often `build/component-state.env` is missing
+(run `./setup.sh`), the Wine executable no longer reports the version setup
+recorded (re-run `./setup.sh --no-yabridge`), or `prefix-copy/` is no longer the
+clone whose provenance was validated (`./daw-env.sh --fresh <daw>`). The DAW is
+not started and `isolation/run-manifest.json` from your last successful launch
+is left untouched.
+
+### Wine output is too noisy, or too quiet
+
+Wine's diagnostics are no longer suppressed for you. Pass `--quiet-wine` for a
+silent run, or set `WINEDEBUG` yourself (`WINEDEBUG=+relay ./daw-env.sh reaper`)
+— see [Wine diagnostics](#wine-diagnostics). Check
+`isolation/run-manifest.json` if you want to know which of the two the last run
+actually used.
 
 ### License activation fails
 

@@ -534,8 +534,10 @@ export YABRIDGE_HOST_EXE="$YABRIDGE_OUT/yabridge-host.exe"
 export YABRIDGE_TEST_WINE="$WINE_DIR/bin/wine"
 export YABRIDGE_TEST_YABRIDGE="$YABRIDGE_OUT"
 
-# Prevent WINEDEBUG spam during tests
-export WINEDEBUG=-all
+# WINEDEBUG is deliberately left alone. Silencing Wine here would hide the
+# warnings and crash traces of every later run, including plugin failures the
+# whole prefix exists to investigate. Pass --quiet-wine to ./daw-env.sh, or
+# export WINEDEBUG yourself, when you want a quiet log.
 
 # Aliases for convenience
 alias yabridge-wine='env WINELOADER="$WINE_DIR/bin/wine" WINEPREFIX="\$WINEPREFIX" "$WINE_DIR/bin/wine"'

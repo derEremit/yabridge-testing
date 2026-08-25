@@ -16,11 +16,10 @@ setup() {
   mkdir -p "$FIXTURE_ROOT/lib" "$FIXTURE_BIN" "$YABRIDGE_HOME" \
     "$PRODUCTION_HOME"
   cp "$PROJECT_ROOT/daw-env.sh" "$FIXTURE_ROOT/daw-env.sh"
-  for helper in clone-state.sh isolated-bridges.sh sandbox.sh; do
-    if [[ -f "$PROJECT_ROOT/lib/$helper" ]]; then
-      cp "$PROJECT_ROOT/lib/$helper" "$FIXTURE_ROOT/lib/$helper"
-    fi
-  done
+  copy_launcher_libraries "$FIXTURE_ROOT/lib"
+  # A launch records the components it used, so the identities setup.sh writes
+  # are part of a working fixture project.
+  seed_component_state_file "$FIXTURE_ROOT/build/component-state.env"
 
   cat > "$FIXTURE_ROOT/env.sh" <<EOF
 export WINELOADER="$FIXTURE_BIN/wine"
@@ -250,7 +249,7 @@ write_provenance() {
   [[ "$output" == *"source and clone paths must not be nested"* ]]
   [ ! -e "$CALLS" ]
   [ ! -e "$real_root/prefix-copy" ]
-  ! compgen -G "$real_root/prefix-copy.new.*" >/dev/null
+  refute compgen -G "$real_root/prefix-copy.new.*"
   [ -f "$SOURCE/system.reg" ]
 }
 
@@ -324,7 +323,7 @@ write_provenance() {
   [ "${provenance[0]}" = "$(realpath "$SOURCE")" ]
   [ "${provenance[1]}" = "$device" ]
   [ "${provenance[2]}" = "$inode" ]
-  ! compgen -G "$FIXTURE_ROOT/prefix-copy.new.*" >/dev/null
+  refute compgen -G "$FIXTURE_ROOT/prefix-copy.new.*"
 }
 
 @test "fresh fails before copying when GNU mv lacks atomic exchange" {
@@ -351,7 +350,7 @@ EOF
   [[ "$output" == *"install or update GNU coreutils"* ]]
   [ "$(wc -l < "$CALLS")" -eq 1 ]
   [ "$(cat "$FIXTURE_ROOT/prefix-copy/existing")" = "existing clone" ]
-  ! compgen -G "$FIXTURE_ROOT/prefix-copy.new.*" >/dev/null
+  refute compgen -G "$FIXTURE_ROOT/prefix-copy.new.*"
 }
 
 @test "refresh bridges is accepted independently without refreshing the clone" {

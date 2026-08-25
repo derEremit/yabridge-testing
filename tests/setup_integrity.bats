@@ -37,7 +37,7 @@ start_setup_lock_holder() {
 }
 
 assert_no_candidate_directories() {
-  ! compgen -G "$FIXTURE_ROOT/build/.wine-candidate.*" >/dev/null
+  refute compgen -G "$FIXTURE_ROOT/build/.wine-candidate.*"
 }
 
 # Emits shell code that renames the build directory away and recreates an empty
@@ -61,7 +61,7 @@ EOF
 
   [ "$status" -ne 0 ]
   [[ "$output" == *"Wine archive checksum mismatch"* ]]
-  ! grep -q '^tar ' "$CALLS"
+  refute grep -q '^tar ' "$CALLS"
   [ ! -e "$FIXTURE_ROOT/build/wine/bin/wine" ]
 }
 
@@ -106,7 +106,7 @@ EOF
 
   [ "$status" -ne 0 ]
   [[ "$output" == *"unsafe link target"* ]]
-  ! grep -q 'tar -xaf' "$CALLS"
+  refute grep -q 'tar -xaf' "$CALLS"
   [ ! -e "$FIXTURE_ROOT/build/wine" ]
 }
 
@@ -117,7 +117,7 @@ EOF
 
   [ "$status" -ne 0 ]
   [[ "$output" == *"unsafe link target"* ]]
-  ! grep -q 'tar -xaf' "$CALLS"
+  refute grep -q 'tar -xaf' "$CALLS"
   [ ! -e "$FIXTURE_ROOT/build/wine" ]
 }
 
@@ -247,7 +247,7 @@ EOF
   [ ! -e "$FIXTURE_ROOT/build/wine" ]
   [ ! -e "$FIXTURE_ROOT/build/component-state.env" ]
   assert_no_candidate_directories
-  ! grep -q '^tar ' "$CALLS"
+  refute grep -q '^tar ' "$CALLS"
 }
 
 @test "setup rejects a build directory symlink without touching its target" {

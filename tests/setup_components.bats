@@ -286,3 +286,27 @@ run_setup_fixture() {
   grep -q "git .*checkout.*48ea974" "$CALLS"
   grep -q "ninja" "$CALLS"
 }
+
+# Wine's diagnostics belong to whoever launches Wine, so the generated
+# environment must not silence them for every later run. The one place setup
+# still suppresses them is its own prefix initialization, where the output is
+# noise nobody asked for.
+@test "generated environment leaves Wine diagnostics to the caller" {
+  seed_wine_cache
+  rm -f "$FIXTURE/prefix/system.reg"
+  cat > "$FIXTURE/build/wine/bin/wineboot" <<EOF
+#!/bin/bash
+printf 'WINEDEBUG=%s\n' "\${WINEDEBUG-<unset>}" > "$BATS_TEST_TMPDIR/wineboot.env"
+EOF
+  chmod +x "$FIXTURE/build/wine/bin/wineboot"
+
+  run_setup_fixture --no-wine --no-yabridge
+
+  [ "$status" -eq 0 ]
+  [ -f "$FIXTURE/env.sh" ]
+  refute grep -Eq '^[[:space:]]*(export[[:space:]]+)?WINEDEBUG=' "$FIXTURE/env.sh"
+  run bash -c "source '$FIXTURE/env.sh' > /dev/null 2>&1
+printf 'WINEDEBUG=%s\n' \"\${WINEDEBUG-<unset>}\""
+  [ "$output" = "WINEDEBUG=<unset>" ]
+  [ "$(cat "$BATS_TEST_TMPDIR/wineboot.env")" = "WINEDEBUG=-all" ]
+}
