@@ -90,6 +90,8 @@ EOF
   chmod +x "$FIXTURE_BIN/fake-daw" "$FIXTURE_BIN/wine" \
     "$FIXTURE_BIN/wineserver" "$FIXTURE_BIN/cp" "$FAKE_YABRIDGECTL"
 
+  export TMPDIR="$BATS_TEST_TMPDIR/tmp"
+  mkdir -p "$TMPDIR"
   export YABRIDGECTL_CALLS="$CALLS"
   export YABRIDGECTL_ENV="$ENV_LOG"
   export DAW_TEST_CP_CALLS="$CP_CALLS"
@@ -393,6 +395,104 @@ HOOK
   [ -f "$OUTSIDE/Evil.dll" ]
 }
 
+# A redirected intermediate component is worse than a redirected leaf: the
+# bridges it holds can point at legitimate clone plugins, so nothing downstream
+# notices that the directory handed to the DAW lives outside the isolated home.
+@test "bridge validation rejects a symlinked intermediate bridge component" {
+  load_isolated_bridges
+  prepare_clone_fixture
+  write_sync_hook <<'HOOK'
+outside_vst="$BRIDGE_TEST_OUTSIDE/fake-vst"
+mkdir -p "$outside_vst/yabridge"
+printf '%s\n' 'native' > "$outside_vst/yabridge/Good.so"
+ln -s "$BRIDGE_TEST_COPY/Good.dll" "$outside_vst/yabridge/Good.dll"
+rm -rf "$HOME/.vst"
+ln -s "$outside_vst" "$HOME/.vst"
+HOOK
+
+  run_prepare
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"isolated bridge root is a symlink"* ]]
+  [[ "$output" == *"/home/.vst"* ]]
+  [[ "$output" != *"/home/.vst/yabridge"* ]]
+  [ ! -e "$ISOLATION" ]
+  ! compgen -G "$FIXTURE_ROOT/isolation.new.*" >/dev/null
+}
+
+@test "bridge validation fails closed when a bridge root cannot be traversed" {
+  load_isolated_bridges
+  prepare_clone_fixture
+  good_sync_hook
+  cat > "$FIXTURE_BIN/find" <<'EOF'
+#!/bin/bash
+if [[ "${1:-}" == */.vst/yabridge ]]; then
+  printf 'find: %s: Permission denied\n' "$1" >&2
+  exit 1
+fi
+exec /usr/bin/find "$@"
+EOF
+  chmod +x "$FIXTURE_BIN/find"
+
+  run_prepare
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"could not traverse the isolated bridge root"* ]]
+  [ ! -e "$ISOLATION" ]
+  ! compgen -G "$FIXTURE_ROOT/isolation.new.*" >/dev/null
+  ! compgen -G "$TMPDIR/yabridge-bridge-scan.*" >/dev/null
+}
+
+@test "bridge validation classifies Windows metadata case-insensitively" {
+  load_isolated_bridges
+  prepare_clone_fixture
+  write_sync_hook <<'HOOK'
+mkdir -p "$HOME/.vst/yabridge"
+printf '%s\n' 'native' > "$HOME/.vst/yabridge/Upper.so"
+ln -s "$BRIDGE_TEST_OUTSIDE/Evil.dll" "$HOME/.vst/yabridge/Upper.DLL"
+HOOK
+
+  run_prepare
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"escapes the plugin clone"* ]]
+  [ ! -e "$ISOLATION" ]
+}
+
+@test "an uppercase Windows extension counts as generated bridge output" {
+  load_isolated_bridges
+  prepare_clone_fixture
+  write_sync_hook <<'HOOK'
+mkdir -p "$HOME/.vst/yabridge"
+printf '%s\n' 'native' > "$HOME/.vst/yabridge/Upper.so"
+ln -s "$BRIDGE_TEST_COPY/Good.dll" "$HOME/.vst/yabridge/Upper.DLL"
+HOOK
+
+  run_prepare
+
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"no isolated yabridge bridges were generated"* ]]
+  [ -L "$ISOLATED_HOME/.vst/yabridge/Upper.DLL" ]
+}
+
+@test "yabridgectl runs from a path containing an equals sign" {
+  load_isolated_bridges
+  prepare_clone_fixture
+  good_sync_hook
+  local equals_dir="$BATS_TEST_TMPDIR/ya=dir"
+  mkdir -p "$equals_dir"
+  cp "$FAKE_YABRIDGECTL" "$equals_dir/yabridgectl"
+  chmod +x "$equals_dir/yabridgectl"
+
+  run prepare_isolated_bridges \
+    "$FIXTURE_ROOT" "$COPY" "$equals_dir/yabridgectl" "$YABRIDGE_HOME"
+
+  [ "$status" -eq 0 ]
+  grep -Fxq "sync --force --prune" "$CALLS"
+  grep -Fxq "HOME=$FIXTURE_ROOT/isolation.new.$$/home" "$ENV_LOG"
+  [ -L "$ISOLATED_HOME/.vst/yabridge/Good.dll" ]
+}
+
 @test "validate_bridge_targets rejects targets outside the clone directly" {
   load_isolated_bridges
   prepare_clone_fixture
@@ -492,6 +592,54 @@ HOOK
   [ "$(cat "$ISOLATED_HOME/.vst/yabridge/existing")" = "keep me" ]
   [ -f "$ISOLATION/.yabridge-staging-bridges" ]
   ! compgen -G "$FIXTURE_ROOT/isolation.new.*" >/dev/null
+}
+
+@test "stale reused bridge state names refresh-bridges as the recovery" {
+  load_isolated_bridges
+  prepare_clone_fixture
+  good_sync_hook
+  run_prepare
+  [ "$status" -eq 0 ]
+  rm -f "$COPY/Good.dll"
+
+  run_prepare
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"does not resolve"* ]]
+  [[ "$output" == *"stale or unusable"* ]]
+  [[ "$output" == *"Regenerate it with --refresh-bridges"* ]]
+  [ "$(sync_call_count)" -eq 1 ]
+}
+
+@test "empty reused bridge state names refresh-bridges as the recovery" {
+  load_isolated_bridges
+  prepare_clone_fixture
+  good_sync_hook
+  run_prepare
+  [ "$status" -eq 0 ]
+  rm -rf "$ISOLATED_HOME/.vst/yabridge" "$ISOLATED_HOME/.vst3/yabridge" \
+    "$ISOLATED_HOME/.clap/yabridge"
+  mkdir -p "$ISOLATED_HOME/.vst/yabridge" "$ISOLATED_HOME/.vst3/yabridge" \
+    "$ISOLATED_HOME/.clap/yabridge"
+
+  run_prepare
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"no isolated yabridge bridges were generated"* ]]
+  [[ "$output" == *"stale or unusable"* ]]
+  [[ "$output" == *"Regenerate it with --refresh-bridges"* ]]
+}
+
+@test "a freshly generated failure does not suggest refresh-bridges" {
+  load_isolated_bridges
+  prepare_clone_fixture
+  empty_sync_hook
+
+  run_prepare
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"no isolated yabridge bridges were generated"* ]]
+  [[ "$output" != *"stale or unusable"* ]]
 }
 
 @test "rejected refresh does not activate escaping bridge state" {
@@ -657,10 +805,15 @@ HOOK
 }
 
 @test "launcher rejects a missing native plugin path value" {
-  run_daw_fixture --prefix "$SOURCE" fake-daw --native-plugin-path
+  good_sync_hook
 
-  [ "$status" -ne 0 ]
+  run_daw_fixture --prefix "$SOURCE" --native-plugin-path
+
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"Error: --native-plugin-path requires a value"* ]]
   [ ! -e "$ISOLATION" ]
+  [ ! -e "$DAW_ENV_FILE" ]
+  [ "$(sync_call_count)" -eq 0 ]
 }
 
 @test "launcher refreshes bridges without recloning the prefix" {
@@ -672,6 +825,30 @@ HOOK
 
   [ "$status" -eq 0 ]
   [ "$(wc -l < "$CP_CALLS")" -eq 1 ]
+  [ "$(sync_call_count)" -eq 2 ]
+}
+
+@test "launcher reclones with fresh without regenerating bridges" {
+  good_sync_hook
+  run_daw_fixture --prefix "$SOURCE" fake-daw
+  [ "$status" -eq 0 ]
+
+  run_daw_fixture --fresh --prefix "$SOURCE" fake-daw
+
+  [ "$status" -eq 0 ]
+  [ "$(wc -l < "$CP_CALLS")" -eq 2 ]
+  [ "$(sync_call_count)" -eq 1 ]
+}
+
+@test "launcher regenerates bridges with fresh only when refresh is explicit" {
+  good_sync_hook
+  run_daw_fixture --prefix "$SOURCE" fake-daw
+  [ "$status" -eq 0 ]
+
+  run_daw_fixture --fresh --refresh-bridges --prefix "$SOURCE" fake-daw
+
+  [ "$status" -eq 0 ]
+  [ "$(wc -l < "$CP_CALLS")" -eq 2 ]
   [ "$(sync_call_count)" -eq 2 ]
 }
 

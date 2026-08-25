@@ -15,6 +15,8 @@ ISOLATED_BRIDGES_REFRESH="${ISOLATED_BRIDGES_REFRESH:-false}"
 ISOLATED_BRIDGES_ALLOW_EMPTY="${ISOLATED_BRIDGES_ALLOW_EMPTY:-false}"
 ISOLATED_BRIDGES_EMPTY_REPORTED=false
 ISOLATED_BRIDGE_RELATIVE_ROOTS=(".vst/yabridge" ".vst3/yabridge" ".clap/yabridge")
+ISOLATED_BRIDGE_SCAN_TEMPLATE_NAME="yabridge-bridge-scan.XXXXXX"
+ISOLATED_BRIDGE_SCAN_ENTRIES=()
 ISOLATED_BRIDGE_HOME=""
 ISOLATED_BRIDGE_TARGET_COUNT=0
 ISOLATED_BRIDGE_ACTIVE_IDENTITY=""
@@ -53,6 +55,16 @@ report_isolated_bridge_recovery() {
     echo "  rm -rf -- $active_quoted" >&2
 }
 
+# Only reached when a tree that was reused rather than regenerated no longer
+# validates, which is exactly the case a bridge refresh repairs.
+report_isolated_bridge_refresh_hint() {
+    local active="$1"
+
+    echo "The reused isolated bridge tree at $active is stale or unusable." >&2
+    echo "Regenerate it with --refresh-bridges, for example:" >&2
+    echo "  ./daw-env.sh --refresh-bridges <daw-binary>" >&2
+}
+
 # Only ever removes a directory this invocation created for its own bridge
 # candidate, so a concurrent launcher's candidate and any foreign sibling are
 # always left alone.
@@ -68,19 +80,21 @@ cleanup_owned_bridge_candidate() {
 
 # Windows plugin references are the only bridge entries that may point into the
 # clone; everything else yabridgectl writes is a native chainloader copy.
+# Extensions are matched case-insensitively so an uppercase reference can
+# neither escape validation nor be missed when counting generated bridges.
 isolated_bridge_metadata_kind() {
     local entry="$1"
     local root="$2"
     local relative="${entry#"$root"/}"
 
-    case "$entry" in
+    case "${entry,,}" in
         *.dll | *.vst3-win | *.clap-win)
             printf 'windows\n'
             return 0
             ;;
     esac
-    case "/$relative" in
-        */Contents/x86_64-win/* | */Contents/x86-win/*)
+    case "/${relative,,}" in
+        */contents/x86_64-win/* | */contents/x86-win/*)
             printf 'windows\n'
             return 0
             ;;
@@ -88,11 +102,81 @@ isolated_bridge_metadata_kind() {
     printf 'native\n'
 }
 
+# Every component between the isolated home and a bridge root must be a real
+# directory at its expected location. A redirected intermediate component such
+# as `.vst` is more dangerous than a redirected leaf, because the bridges inside
+# it can still resolve into the clone while the directory handed to the DAW
+# lives entirely outside the isolated tree.
+assert_isolated_bridge_root_location() {
+    local home_canonical="$1"
+    local relative="$2"
+    local expected="$home_canonical/$relative"
+    local current="$home_canonical"
+    local component root_canonical
+    local -a components=()
+
+    IFS='/' read -r -a components <<< "$relative"
+    for component in "${components[@]}"; do
+        current="$current/$component"
+        if [[ -L "$current" ]]; then
+            isolated_bridges_error "isolated bridge root is a symlink: $current"
+            return 1
+        fi
+        if [[ -e "$current" && ! -d "$current" ]]; then
+            isolated_bridges_error "isolated bridge root is not a directory: $current"
+            return 1
+        fi
+    done
+
+    [[ -d "$expected" ]] || return 0
+
+    # Guards against a component being swapped between the walk above and the
+    # traversal that follows.
+    if ! root_canonical="$(realpath -e -- "$expected" 2>/dev/null)"; then
+        isolated_bridges_error "isolated bridge root does not resolve: $expected"
+        return 1
+    fi
+    if [[ "$root_canonical" != "$expected" ]]; then
+        isolated_bridges_error "isolated bridge root resolves outside the isolated home: $expected -> $root_canonical"
+        return 1
+    fi
+}
+
+# find's exit status is never discarded: an unreadable directory or any other
+# traversal error fails closed instead of validating a partial listing. The
+# listing travels through a private temporary file because command substitution
+# cannot carry the NUL separators that make arbitrary filenames safe.
+scan_isolated_bridge_root() {
+    local root="$1"
+    local listing
+    local find_status=0
+
+    ISOLATED_BRIDGE_SCAN_ENTRIES=()
+    if ! listing="$(mktemp -- \
+        "${TMPDIR:-/tmp}/$ISOLATED_BRIDGE_SCAN_TEMPLATE_NAME")"; then
+        isolated_bridges_error "could not create a temporary bridge listing for $root"
+        return 1
+    fi
+    find "$root" -mindepth 1 -print0 > "$listing" || find_status=$?
+    if [[ "$find_status" -ne 0 ]]; then
+        rm -f -- "$listing"
+        isolated_bridges_error "could not traverse the isolated bridge root: $root"
+        return 1
+    fi
+    if ! mapfile -d '' -t ISOLATED_BRIDGE_SCAN_ENTRIES < "$listing"; then
+        rm -f -- "$listing"
+        ISOLATED_BRIDGE_SCAN_ENTRIES=()
+        isolated_bridges_error "could not read the isolated bridge listing for $root"
+        return 1
+    fi
+    rm -f -- "$listing"
+}
+
 validate_bridge_targets() {
     local home="$1"
     local copy="$2"
     local yabridge_home="${3:-}"
-    local copy_canonical yabridge_canonical
+    local copy_canonical yabridge_canonical home_canonical
     local relative root entry kind target
     local windows_targets=0
 
@@ -108,20 +192,24 @@ validate_bridge_targets() {
         isolated_bridges_error "cannot resolve the yabridge home for bridge validation: $yabridge_home"
         return 1
     fi
+    if [[ -L "$home" ]]; then
+        isolated_bridges_error "isolated bridge home is a symlink: $home"
+        return 1
+    fi
+    if ! home_canonical="$(realpath -e -- "$home" 2>/dev/null)" ||
+        [[ ! -d "$home_canonical" ]]; then
+        isolated_bridges_error "cannot resolve the isolated bridge home: $home"
+        return 1
+    fi
 
     for relative in "${ISOLATED_BRIDGE_RELATIVE_ROOTS[@]}"; do
-        root="$home/$relative"
-        if [[ -L "$root" ]]; then
-            isolated_bridges_error "isolated bridge root is a symlink: $root"
+        assert_isolated_bridge_root_location "$home_canonical" "$relative" ||
             return 1
-        fi
-        if [[ -e "$root" && ! -d "$root" ]]; then
-            isolated_bridges_error "isolated bridge root is not a directory: $root"
-            return 1
-        fi
+        root="$home_canonical/$relative"
         [[ -d "$root" ]] || continue
+        scan_isolated_bridge_root "$root" || return 1
 
-        while IFS= read -r -d '' entry; do
+        for entry in ${ISOLATED_BRIDGE_SCAN_ENTRIES[@]+"${ISOLATED_BRIDGE_SCAN_ENTRIES[@]}"}; do
             if [[ "$entry" == *$'\n'* || "$entry" == *$'\r'* ]]; then
                 isolated_bridges_error "isolated bridge entry contains an unsupported newline"
                 return 1
@@ -153,9 +241,10 @@ validate_bridge_targets() {
                     return 1
                 fi
             fi
-        done < <(find "$root" -mindepth 1 -print0)
+        done
     done
 
+    ISOLATED_BRIDGE_SCAN_ENTRIES=()
     ISOLATED_BRIDGE_TARGET_COUNT="$windows_targets"
 }
 
@@ -241,6 +330,26 @@ isolated_bridge_active_identity_matches() {
         "$(isolated_bridge_path_identity "$active")" == "$ISOLATED_BRIDGE_ACTIVE_IDENTITY" ]]
 }
 
+# Every yabridgectl call is confined to the candidate HOME/XDG tree, so it can
+# neither read nor write production yabridgectl configuration.
+#
+# Bash prefix assignments are used instead of `env`: GNU env scans its leading
+# arguments for `NAME=VALUE` pairs before deciding which one is the command, and
+# no placement of `--` stops it from swallowing an executable path that contains
+# `=`. `env NAME=1 -- cmd` fails outright because `--` becomes the command, and
+# `env -- NAME=1 /opt/a=b/prog` treats the program path as another assignment.
+run_isolated_yabridgectl() {
+    local home="$1"
+    local yabridgectl="$2"
+    shift 2
+
+    HOME="$home" \
+        XDG_CONFIG_HOME="$home/.config" \
+        XDG_DATA_HOME="$home/.local/share" \
+        XDG_CACHE_HOME="$home/.cache" \
+        "$yabridgectl" "$@"
+}
+
 generate_isolated_bridges() {
     local root="$1"
     local active="$2"
@@ -250,7 +359,6 @@ generate_isolated_bridges() {
     local yabridge_canonical="$6"
     local active_status="$7"
     local candidate_home="$candidate/home"
-    local -a isolated_env=()
     local relative
 
     if [[ -L "$root" || ! -d "$root" ]]; then
@@ -280,28 +388,21 @@ generate_isolated_bridges() {
         fi
     done
 
-    # Every yabridgectl call is confined to the candidate HOME/XDG tree, so it
-    # can neither read nor write production yabridgectl configuration.
-    isolated_env=(
-        env
-        "HOME=$candidate_home"
-        "XDG_CONFIG_HOME=$candidate_home/.config"
-        "XDG_DATA_HOME=$candidate_home/.local/share"
-        "XDG_CACHE_HOME=$candidate_home/.cache"
-    )
-
     echo "Generating isolated yabridge bridges for $copy_canonical..."
-    if ! "${isolated_env[@]}" "$yabridgectl" set --path="$yabridge_canonical"; then
+    if ! run_isolated_yabridgectl "$candidate_home" "$yabridgectl" \
+        set --path="$yabridge_canonical"; then
         isolated_bridges_error "could not point the isolated yabridgectl at $yabridge_canonical"
         cleanup_owned_bridge_candidate
         return 1
     fi
-    if ! "${isolated_env[@]}" "$yabridgectl" add "$copy_canonical"; then
+    if ! run_isolated_yabridgectl "$candidate_home" "$yabridgectl" \
+        add "$copy_canonical"; then
         isolated_bridges_error "could not add the plugin clone to the isolated yabridgectl"
         cleanup_owned_bridge_candidate
         return 1
     fi
-    if ! "${isolated_env[@]}" "$yabridgectl" sync --force --prune; then
+    if ! run_isolated_yabridgectl "$candidate_home" "$yabridgectl" \
+        sync --force --prune; then
         isolated_bridges_error "isolated yabridgectl sync failed for $copy_canonical"
         cleanup_owned_bridge_candidate
         return 1
@@ -415,12 +516,16 @@ prepare_isolated_bridges() {
     fi
 
     # The activated tree is re-validated on every launch, including reuse, so a
-    # bridge that started pointing outside the clone can never reach the DAW.
+    # bridge that started pointing outside the clone can never reach the DAW. A
+    # reused tree that no longer validates is the one case a refresh repairs, so
+    # say so instead of leaving the user with a bare rejection.
     if ! validate_bridge_targets "$active/home" "$copy_canonical" \
         "$yabridge_canonical"; then
+        [[ "$regenerate" == true ]] || report_isolated_bridge_refresh_hint "$active"
         return 1
     fi
     if ! assert_bridge_output_present "$copy_canonical"; then
+        [[ "$regenerate" == true ]] || report_isolated_bridge_refresh_hint "$active"
         return 1
     fi
 
