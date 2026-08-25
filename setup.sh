@@ -22,13 +22,32 @@ ok()    { echo -e "${GREEN}[✓]${NC} $1"; }
 err()   { echo -e "${RED}[✗]${NC} $1"; }
 
 WINE_CANDIDATE_ROOT=""
+LOCKED_BUILD_IDENTITY=""
+
+# Path strings stay equal across a rename-and-recreate, so only the device and
+# inode of the object at $BUILD distinguish the locked build directory from an
+# unlocked replacement.
+build_identity_matches() {
+    local current
+    [[ -n "$LOCKED_BUILD_IDENTITY" && ! -L "$BUILD" ]] &&
+        current="$(stat -c '%d:%i' -- "$BUILD" 2>/dev/null)" &&
+        [[ "$current" == "$LOCKED_BUILD_IDENTITY" ]]
+}
+
+assert_locked_build_identity() {
+    if ! build_identity_matches; then
+        err "Build directory was replaced while setup held its lock: $BUILD"
+        exit 1
+    fi
+}
 
 is_owned_wine_candidate() {
     local candidate="$1"
-    [[ -n "$candidate" &&
-        "$candidate" == "$BUILD"/.wine-candidate.* &&
-        -d "$candidate" &&
-        ! -L "$candidate" ]]
+    build_identity_matches &&
+        [[ -n "$candidate" &&
+            "$candidate" == "$BUILD"/.wine-candidate.* &&
+            -d "$candidate" &&
+            ! -L "$candidate" ]]
 }
 
 cleanup_current_wine_candidate() {
@@ -170,6 +189,12 @@ if [[ -L "$BUILD" ||
     err "Build directory changed while acquiring the setup lock"
     exit 1
 fi
+LOCKED_BUILD_IDENTITY="$(stat -L -c '%d:%i' -- \
+    "/proc/$$/fd/$SETUP_LOCK_FD" 2>/dev/null)" || {
+    err "Could not identify the locked build directory"
+    exit 1
+}
+assert_locked_build_identity
 mkdir -p "$PREFIX"
 cleanup_stale_wine_candidates
 
@@ -253,6 +278,7 @@ for r in releases:
         "$WINE_DIR/bin/wine" --version
     else
         info "Downloading wine-staging (Kron4ek prebuilt)..."
+        assert_locked_build_identity
         TARBALL="$BUILD/wine-${WINE_VER}-staging-amd64.tar.xz"
         WINE_CANDIDATE_ROOT="$(mktemp -d "$BUILD/.wine-candidate.XXXXXX")"
         trap cleanup_current_wine_candidate EXIT
@@ -358,6 +384,7 @@ PY
             exit 1
         fi
 
+        assert_locked_build_identity
         mv -f "$WINE_CANDIDATE_ARCHIVE" "$TARBALL"
         if [[ -e "$WINE_DIR" ]]; then
             if ! mv --exchange --no-copy -T "$EXTRACTED_DIR" "$WINE_DIR"; then
@@ -387,6 +414,7 @@ fi
 
 # ── Yabridge build ───────────────────────────────────────────────────────────
 if [[ "$SKIP_YABRIDGE" == false ]]; then
+    assert_locked_build_identity
     # Fetch and resolve the requested ref before deciding whether outputs match.
     if [[ -d "$YABRIDGE_SRC" ]]; then
         info "Updating yabridge source ($YABRIDGE_BRANCH)..."
@@ -442,6 +470,7 @@ if [[ "$SKIP_YABRIDGE" == false ]]; then
     ls -lh "$YABRIDGE_OUT/"
 fi
 
+assert_locked_build_identity
 write_state "$STATE_FILE" \
     "WINE_VERSION=$STATE_WINE_VERSION" \
     "WINE_SHA256=$STATE_WINE_SHA256" \

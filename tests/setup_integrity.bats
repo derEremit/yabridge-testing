@@ -40,6 +40,18 @@ assert_no_candidate_directories() {
   ! compgen -G "$FIXTURE_ROOT/build/.wine-candidate.*" >/dev/null
 }
 
+# Emits shell code that renames the build directory away and recreates an empty
+# replacement at the same path exactly once.
+swap_build_directory_snippet() {
+  cat <<EOF
+if [[ ! -e "$BATS_TEST_TMPDIR/build-swapped" ]]; then
+  : > "$BATS_TEST_TMPDIR/build-swapped"
+  /usr/bin/mv -T -- "$FIXTURE_ROOT/build" "$FIXTURE_ROOT/build.detached"
+  /usr/bin/mkdir -- "$FIXTURE_ROOT/build"
+fi
+EOF
+}
+
 @test "setup rejects a Wine archive with the wrong digest before extraction" {
   FAKE_CHECKSUM_VALID=false
 
@@ -199,6 +211,43 @@ EOF
   grep -q '^sentinel-content$' "$sentinel"
   [ -L "$FIXTURE_ROOT/build/.setup.lock" ]
   [ "$(readlink "$FIXTURE_ROOT/build/.setup.lock")" = "$sentinel" ]
+}
+
+@test "build rename-and-recreate during lock acquisition fails closed" {
+  {
+    printf '#!/bin/bash\n'
+    printf 'if [[ "$1" == "--version" ]]; then exec /usr/bin/flock "$@"; fi\n'
+    swap_build_directory_snippet
+    printf 'exec /usr/bin/flock "$@"\n'
+  } > "$FAKE_BIN/flock"
+  chmod +x "$FAKE_BIN/flock"
+
+  run_setup_fixture --no-wine --no-yabridge
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Build directory was replaced"* ]]
+  [ -e "$BATS_TEST_TMPDIR/build-swapped" ]
+  [ ! -e "$FIXTURE_ROOT/build/component-state.env" ]
+  [ ! -s "$CALLS" ]
+}
+
+@test "build rename-and-recreate after lock validation blocks Wine mutation" {
+  {
+    printf '#!/bin/bash\n'
+    swap_build_directory_snippet
+    printf 'exit 0\n'
+  } > "$FAKE_BIN/pacman"
+  chmod +x "$FAKE_BIN/pacman"
+
+  run_setup_fixture --wine-version 11.8 --wine-sha256 "$WINE_SHA" --no-yabridge
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Build directory was replaced"* ]]
+  [ -e "$BATS_TEST_TMPDIR/build-swapped" ]
+  [ ! -e "$FIXTURE_ROOT/build/wine" ]
+  [ ! -e "$FIXTURE_ROOT/build/component-state.env" ]
+  assert_no_candidate_directories
+  ! grep -q '^tar ' "$CALLS"
 }
 
 @test "setup rejects a build directory symlink without touching its target" {

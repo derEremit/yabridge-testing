@@ -233,6 +233,23 @@ happen in a candidate directory. A verified candidate is atomically exchanged
 with an existing install, so a failed refresh or interrupted activation leaves
 the working Wine installation active.
 
+Only one setup may mutate a project at a time. Setup opens `build/` and holds a
+`flock` on that directory for its whole run, so a second setup exits instead of
+racing the first. Because the lock belongs to the directory *inode* while every
+later step addresses `build/` by *path*, setup also records the device and inode
+it locked and re-checks them before each mutation phase (stale-candidate
+cleanup, Wine download and activation, the yabridge build, and the state file
+write). If `build/` was renamed away and a new directory put in its place, setup
+aborts rather than writing into a directory it does not own.
+
+That check is a consistency guard, not a security boundary. Bash cannot open
+files relative to an already-open directory descriptor, so a small window
+remains between each check and the path-based operation that follows it. The
+guard is sized for the realistic failure — concurrent or interrupted setups and
+leftover state — and anyone who can rename `build/` already runs as your user,
+can edit `setup.sh` itself, and is therefore outside what this script can
+defend against.
+
 Build deps checked on pacman-based distros. On other distros, ensure you have:
 `gcc >= 10`, `meson`, `ninja`, `wine` + `winegcc`, `libxcb-dev`.
 
