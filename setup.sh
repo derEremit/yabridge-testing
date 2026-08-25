@@ -124,17 +124,50 @@ fi
 WINE_SHA256="${WINE_SHA256,,}"
 
 mkdir -p "$BUILD"
+if [[ -L "$BUILD" || ! -d "$BUILD" ]]; then
+    err "Build path must be a direct project directory: $BUILD"
+    exit 1
+fi
+ROOT_CANONICAL="$(realpath -e -- "$ROOT")" || {
+    err "Could not resolve project root for safe setup locking"
+    exit 1
+}
+BUILD_CANONICAL="$(realpath -e -- "$BUILD")" || {
+    err "Could not resolve build directory for safe setup locking"
+    exit 1
+}
+if [[ "$BUILD_CANONICAL" != "$ROOT_CANONICAL/build" ]]; then
+    err "Build directory resolves outside the project root: $BUILD"
+    exit 1
+fi
 if ! command -v flock >/dev/null 2>&1 ||
     ! flock --version >/dev/null 2>&1; then
     err "flock is required for safe setup locking; install util-linux"
     exit 1
 fi
-if ! exec {SETUP_LOCK_FD}> "$BUILD/.setup.lock"; then
-    err "Could not open the setup lock at $BUILD/.setup.lock"
+if ! exec {SETUP_LOCK_FD}< "$BUILD"; then
+    err "Could not open the build directory for safe setup locking"
+    exit 1
+fi
+LOCKED_BUILD_CANONICAL="$(realpath -e -- "/proc/$$/fd/$SETUP_LOCK_FD")" || {
+    err "Could not verify the build directory lock descriptor"
+    exit 1
+}
+if [[ "$LOCKED_BUILD_CANONICAL" != "$BUILD_CANONICAL" ]]; then
+    err "Build directory changed while acquiring the setup lock"
     exit 1
 fi
 if ! flock -n "$SETUP_LOCK_FD"; then
     err "Another setup is already running for $ROOT"
+    exit 1
+fi
+CURRENT_BUILD_CANONICAL="$(realpath -e -- "$BUILD")" || {
+    err "Build directory disappeared while acquiring the setup lock"
+    exit 1
+}
+if [[ -L "$BUILD" ||
+    "$CURRENT_BUILD_CANONICAL" != "$LOCKED_BUILD_CANONICAL" ]]; then
+    err "Build directory changed while acquiring the setup lock"
     exit 1
 fi
 mkdir -p "$PREFIX"

@@ -21,7 +21,7 @@ teardown() {
 
 start_setup_lock_holder() {
   (
-    exec 8> "$FIXTURE_ROOT/build/.setup.lock"
+    exec 8< "$FIXTURE_ROOT/build"
     flock -n 8
     touch "$LOCK_READY"
     while [[ ! -e "$LOCK_RELEASE" ]]; do
@@ -185,5 +185,33 @@ EOF
   [ "$status" -ne 0 ]
   [[ "$output" == *"flock is required"* ]]
   [ -e "$FIXTURE_ROOT/build/.wine-candidate.stale/stale-content" ]
+  [ ! -s "$CALLS" ]
+}
+
+@test "setup ignores a lock-path symlink without modifying its target" {
+  sentinel="$BATS_TEST_TMPDIR/lock-sentinel"
+  printf 'sentinel-content\n' > "$sentinel"
+  ln -s "$sentinel" "$FIXTURE_ROOT/build/.setup.lock"
+
+  run_setup_fixture --no-wine --no-yabridge
+
+  [ "$status" -eq 0 ]
+  grep -q '^sentinel-content$' "$sentinel"
+  [ -L "$FIXTURE_ROOT/build/.setup.lock" ]
+  [ "$(readlink "$FIXTURE_ROOT/build/.setup.lock")" = "$sentinel" ]
+}
+
+@test "setup rejects a build directory symlink without touching its target" {
+  external_build="$BATS_TEST_TMPDIR/external-build"
+  mkdir -p "$external_build"
+  printf 'external-content\n' > "$external_build/sentinel"
+  rm -rf "$FIXTURE_ROOT/build"
+  ln -s "$external_build" "$FIXTURE_ROOT/build"
+
+  run_setup_fixture --no-wine --no-yabridge
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Build path must be a direct project directory"* ]]
+  grep -q '^external-content$' "$external_build/sentinel"
   [ ! -s "$CALLS" ]
 }
