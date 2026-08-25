@@ -1,4 +1,4 @@
-# Build artifacts
+# Build artifacts, including generated component-state.env
 build/
 
 # Wine prefix + COW clone of the real prefix

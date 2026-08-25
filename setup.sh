@@ -10,6 +10,9 @@ WINE_DIR="$BUILD/wine"
 YABRIDGE_SRC="$BUILD/yabridge-src"
 YABRIDGE_OUT="$BUILD/yabridge"
 ENV_FILE="$ROOT/env.sh"
+STATE_FILE="$BUILD/component-state.env"
+
+source "$ROOT/lib/component-state.sh"
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; CYAN='\033[0;36m'; NC='\033[0m'
 info()  { echo -e "${CYAN}[*]${NC} $1"; }
@@ -18,8 +21,9 @@ err()   { echo -e "${RED}[✗]${NC} $1"; }
 
 usage() {
     local status="${1:-1}"
-    echo "Usage: $0 [--wine-version VERSION] [--yabridge-branch BRANCH] [--no-wine] [--no-yabridge]"
+    echo "Usage: $0 [--wine-version VERSION] [--wine-sha256 SHA256] [--yabridge-branch BRANCH] [--no-wine] [--no-yabridge]"
     echo "  --wine-version       Wine version to download (default: latest-staging)"
+    echo "  --wine-sha256        Expected SHA-256 for a requested Wine version"
     echo "  --yabridge-branch    Yabridge git branch/ref (default: master)"
     echo "  --no-wine            Skip wine setup (use system wine)"
     echo "  --no-yabridge        Skip yabridge build"
@@ -36,6 +40,8 @@ require_option_value() {
 }
 
 WINE_VERSION="latest-staging"
+WINE_SHA256=""
+WINE_VERSION_EXPLICIT=false
 YABRIDGE_BRANCH="master"
 SKIP_WINE=false
 SKIP_YABRIDGE=false
@@ -45,6 +51,12 @@ while [[ $# -gt 0 ]]; do
         --wine-version)
             require_option_value "--wine-version" "${2:-}"
             WINE_VERSION="$2"
+            WINE_VERSION_EXPLICIT=true
+            shift 2
+            ;;
+        --wine-sha256)
+            require_option_value "--wine-sha256" "${2:-}"
+            WINE_SHA256="$2"
             shift 2
             ;;
         --yabridge-branch)
@@ -59,7 +71,22 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+if [[ "$SKIP_WINE" == false && "$WINE_VERSION_EXPLICIT" == true && -z "$WINE_SHA256" ]]; then
+    err "--wine-sha256 is required with --wine-version"
+    exit 2
+fi
+if [[ -n "$WINE_SHA256" && ! "$WINE_SHA256" =~ ^[A-Fa-f0-9]{64}$ ]]; then
+    err "--wine-sha256 must be a 64-character hexadecimal digest"
+    exit 2
+fi
+WINE_SHA256="${WINE_SHA256,,}"
+
 mkdir -p "$BUILD" "$PREFIX"
+
+STATE_WINE_VERSION="$(read_state WINE_VERSION "$STATE_FILE" || true)"
+STATE_WINE_SHA256="$(read_state WINE_SHA256 "$STATE_FILE" || true)"
+STATE_YABRIDGE_REF="$(read_state YABRIDGE_REF "$STATE_FILE" || true)"
+STATE_YABRIDGE_COMMIT="$(read_state YABRIDGE_COMMIT "$STATE_FILE" || true)"
 
 # ── Install yabridge build dependencies ──────────────────────────────────────
 info "Checking/installing build dependencies..."
@@ -86,18 +113,11 @@ ok "Build dependencies ready"
 
 # ── Wine setup ────────────────────────────────────────────────────────────────
 if [[ "$SKIP_WINE" == false ]]; then
-    if [[ -f "$WINE_DIR/bin/wine" ]]; then
-        info "Wine already present at $WINE_DIR"
-        "$WINE_DIR/bin/wine" --version
-    else
-        info "Downloading wine-staging (Kron4ek prebuilt)..."
-        mkdir -p "$WINE_DIR"
-
-        # Fetch latest release info from Kron4ek/Wine-Builds
-        if [[ "$WINE_VERSION" == "latest-staging" ]]; then
-            info "Determining latest staging version..."
-            API="https://api.github.com/repos/Kron4ek/Wine-Builds/releases"
-            LATEST=$(curl -fsSL "$API" | python3 -c "
+    # Resolve the requested release before consulting the cache.
+    if [[ "$WINE_VERSION" == "latest-staging" ]]; then
+        info "Determining latest staging version..."
+        API="https://api.github.com/repos/Kron4ek/Wine-Builds/releases"
+        LATEST=$(curl -fsSL "$API" | python3 -c "
 import json, sys
 releases = json.load(sys.stdin)
 for r in releases:
@@ -114,27 +134,51 @@ for r in releases:
         continue
     break
 ")
-            if [[ -z "$LATEST" ]]; then
-                err "Could not determine latest wine-staging version"
-                err "Check https://github.com/Kron4ek/Wine-Builds/releases"
-                exit 1
-            fi
-            WINE_VER="${LATEST%%|*}"
-            WINE_URL="${LATEST##*|}"
-            info "Latest staging version: $WINE_VER"
-        else
-            WINE_VER="$WINE_VERSION"
-            WINE_URL="https://github.com/Kron4ek/Wine-Builds/releases/download/${WINE_VER}/wine-${WINE_VER}-staging-amd64.tar.xz"
+        if [[ -z "$LATEST" ]]; then
+            err "Could not determine latest wine-staging version"
+            err "Check https://github.com/Kron4ek/Wine-Builds/releases"
+            exit 1
         fi
+        WINE_VER="${LATEST%%|*}"
+        WINE_URL="${LATEST##*|}"
+        info "Latest staging version: $WINE_VER"
+    else
+        WINE_VER="$WINE_VERSION"
+        WINE_URL="https://github.com/Kron4ek/Wine-Builds/releases/download/${WINE_VER}/wine-${WINE_VER}-staging-amd64.tar.xz"
+    fi
 
+    WINE_MATCHES=false
+    if [[ -f "$WINE_DIR/bin/wine" ]] &&
+        component_matches WINE_VERSION "$WINE_VER" "$STATE_FILE"; then
+        if [[ -n "$WINE_SHA256" ]]; then
+            component_matches WINE_SHA256 "$WINE_SHA256" "$STATE_FILE" &&
+                WINE_MATCHES=true
+        elif read_state WINE_SHA256 "$STATE_FILE" >/dev/null; then
+            WINE_MATCHES=true
+        fi
+    fi
+
+    if [[ "$WINE_MATCHES" == true ]]; then
+        info "Wine already present at $WINE_DIR"
+        "$WINE_DIR/bin/wine" --version
+    else
+        info "Downloading wine-staging (Kron4ek prebuilt)..."
         TARBALL="$BUILD/wine-${WINE_VER}-staging-amd64.tar.xz"
-        if [[ ! -f "$TARBALL" ]]; then
-            info "Downloading $WINE_URL..."
-            curl -fsSL -o "$TARBALL" "$WINE_URL" || {
-                err "Download failed. Try a different version."
-                err "See: https://github.com/Kron4ek/Wine-Builds/releases"
-                exit 1
-            }
+        rm -rf "$WINE_DIR"
+        rm -f "$TARBALL"
+        info "Downloading $WINE_URL..."
+        curl -fsSL -o "$TARBALL" "$WINE_URL" || {
+            err "Download failed. Try a different version."
+            err "See: https://github.com/Kron4ek/Wine-Builds/releases"
+            exit 1
+        }
+
+        ACTUAL_WINE_SHA256="$(sha256sum "$TARBALL")"
+        ACTUAL_WINE_SHA256="${ACTUAL_WINE_SHA256%% *}"
+        if [[ -n "$WINE_SHA256" && "$ACTUAL_WINE_SHA256" != "$WINE_SHA256" ]]; then
+            rm -f "$TARBALL"
+            err "Wine archive SHA-256 mismatch"
+            exit 1
         fi
 
         info "Extracting wine-staging $WINE_VER..."
@@ -148,6 +192,9 @@ for r in releases:
         fi
         mv "$EXTRACTED_DIR" "$WINE_DIR"
         ok "Wine-staging $WINE_VER extracted to $WINE_DIR"
+
+        STATE_WINE_VERSION="$WINE_VER"
+        STATE_WINE_SHA256="$ACTUAL_WINE_SHA256"
     fi
 
     # Verify
@@ -156,28 +203,36 @@ fi
 
 # ── Yabridge build ───────────────────────────────────────────────────────────
 if [[ "$SKIP_YABRIDGE" == false ]]; then
-    if [[ -f "$YABRIDGE_OUT/libyabridge-vst2.so" ]] && [[ -f "$YABRIDGE_OUT/yabridge-host.exe" ]]; then
+    # Fetch and resolve the requested ref before deciding whether outputs match.
+    if [[ -d "$YABRIDGE_SRC" ]]; then
+        info "Updating yabridge source ($YABRIDGE_BRANCH)..."
+    else
+        info "Cloning yabridge ($YABRIDGE_BRANCH)..."
+        git clone --no-checkout \
+            https://github.com/robbert-vdh/yabridge.git "$YABRIDGE_SRC"
+    fi
+    git -C "$YABRIDGE_SRC" fetch origin "$YABRIDGE_BRANCH"
+    YABRIDGE_COMMIT="$(git -C "$YABRIDGE_SRC" rev-parse FETCH_HEAD)"
+    git -C "$YABRIDGE_SRC" checkout --detach "$YABRIDGE_COMMIT"
+
+    YABRIDGE_MATCHES=false
+    if [[ -f "$YABRIDGE_OUT/libyabridge-vst2.so" ]] &&
+        [[ -f "$YABRIDGE_OUT/yabridge-host.exe" ]] &&
+        component_matches YABRIDGE_REF "$YABRIDGE_BRANCH" "$STATE_FILE" &&
+        component_matches YABRIDGE_COMMIT "$YABRIDGE_COMMIT" "$STATE_FILE"; then
+        YABRIDGE_MATCHES=true
+    fi
+
+    if [[ "$YABRIDGE_MATCHES" == true ]]; then
         info "Yabridge already built at $YABRIDGE_OUT"
     else
-        # Clone
-        if [[ -d "$YABRIDGE_SRC" ]]; then
-            info "Updating yabridge source ($YABRIDGE_BRANCH)..."
-            git -C "$YABRIDGE_SRC" fetch origin
-            git -C "$YABRIDGE_SRC" checkout "$YABRIDGE_BRANCH"
-            git -C "$YABRIDGE_SRC" pull --ff-only
-        else
-            info "Cloning yabridge ($YABRIDGE_BRANCH)..."
-            git clone --branch "$YABRIDGE_BRANCH" --depth 1 \
-                https://github.com/robbert-vdh/yabridge.git "$YABRIDGE_SRC"
-        fi
-
-        # Get commit info
-        YABRIDGE_COMMIT=$(git -C "$YABRIDGE_SRC" rev-parse --short HEAD)
         info "Building yabridge @ $YABRIDGE_COMMIT..."
 
         # Build
         BUILD_DIR="$YABRIDGE_SRC/build"
-        meson setup "$YABRIDGE_SRC" "$BUILD_DIR" --buildtype=release \
+        MESON_WIPE=()
+        [[ -d "$BUILD_DIR" ]] && MESON_WIPE=(--wipe)
+        meson setup "${MESON_WIPE[@]}" "$BUILD_DIR" "$YABRIDGE_SRC" --buildtype=release \
             --cross-file="$YABRIDGE_SRC/cross-wine.conf" \
             --unity=on --unity-size=1000 \
             --prefix="$YABRIDGE_OUT"
@@ -186,6 +241,7 @@ if [[ "$SKIP_YABRIDGE" == false ]]; then
 
         # Collect build artifacts into $YABRIDGE_OUT
         info "Installing yabridge to $YABRIDGE_OUT..."
+        rm -rf "$YABRIDGE_OUT"
         mkdir -p "$YABRIDGE_OUT"
         find "$BUILD_DIR" -maxdepth 3 -type f \
             \( -name 'libyabridge-*.so' -o -name 'yabridge-host.exe' -o -name 'yabridge-host.exe.so' \) \
@@ -193,11 +249,20 @@ if [[ "$SKIP_YABRIDGE" == false ]]; then
         # Also copy yabridgectl if present
         find "$BUILD_DIR" -maxdepth 3 -type f -name 'yabridgectl' -exec cp -v {} "$YABRIDGE_OUT/" \; 2>/dev/null || true
         ok "Yabridge built and installed to $YABRIDGE_OUT"
+
+        STATE_YABRIDGE_REF="$YABRIDGE_BRANCH"
+        STATE_YABRIDGE_COMMIT="$YABRIDGE_COMMIT"
     fi
 
     # Show built files
     ls -lh "$YABRIDGE_OUT/"
 fi
+
+write_state "$STATE_FILE" \
+    "WINE_VERSION=$STATE_WINE_VERSION" \
+    "WINE_SHA256=$STATE_WINE_SHA256" \
+    "YABRIDGE_REF=$STATE_YABRIDGE_REF" \
+    "YABRIDGE_COMMIT=$STATE_YABRIDGE_COMMIT"
 
 # ── Generate env.sh ──────────────────────────────────────────────────────────
 info "Generating $ENV_FILE..."
