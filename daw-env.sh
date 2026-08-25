@@ -15,7 +15,8 @@
 #   - Wine 11.8 will auto-upgrade the prefix on first run (registry + system
 #     DLLs). That upgrade — and every plugin write — lands on COW extents in
 #     prefix-copy/. The original prefix's blocks are physically never modified.
-#   - No backups, no restores, no cleanup, no traps. Nothing to go wrong on exit.
+#   - Clone creation uses a temporary sibling and atomic rename. Failed copies
+#     remove only that invocation's temporary clone.
 #
 # The clone persists between runs (so the one-time wine upgrade isn't repeated
 # and plugin state survives). Use --fresh to re-clone, --clean to delete it.
@@ -30,6 +31,7 @@
 #   ./daw-env.sh bitwig-studio
 #   ./daw-env.sh reaper /path/to/project.rpp
 #   ./daw-env.sh --fresh reaper            # re-clone the prefix first
+#   ./daw-env.sh --refresh-bridges reaper  # refresh bridges, reuse the clone
 #   ./daw-env.sh --prefix ~/.wine reaper   # clone a different real prefix
 #   ./daw-env.sh --clean                   # delete prefix-copy/ and exit
 
@@ -39,6 +41,10 @@ ROOT="$(cd "$(dirname "$0")" && pwd)"
 COPY="$ROOT/prefix-copy"
 REAL_PREFIX="$HOME/.audio-production/winplugins"
 FRESH=false
+CLEAN=false
+REFRESH_BRIDGES=false
+
+source "$ROOT/lib/clone-state.sh"
 
 require_option_value() {
     local option="$1"
@@ -53,30 +59,34 @@ require_option_value() {
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --fresh)   FRESH=true; shift ;;
+        --refresh-bridges) REFRESH_BRIDGES=true; shift ;;
         --prefix)
             require_option_value "--prefix" "${2:-}"
             REAL_PREFIX="$2"
             shift 2
             ;;
-        --clean)   echo "Removing $COPY..."; rm -rf "$COPY"; echo "Done."; exit 0 ;;
+        --clean)   CLEAN=true; shift ;;
         -h|--help)
-            sed -n '2,33p' "$0" | sed 's/^# \?//'
+            sed -n '2,36p' "$0" | sed 's/^# \?//'
             exit 0 ;;
         --) shift; break ;;
         -*) echo "Unknown option: $1" >&2; exit 1 ;;
         *)  break ;;
     esac
 done
+export YABRIDGE_STAGING_REFRESH_BRIDGES="$REFRESH_BRIDGES"
 
 DAW="${1:-}"
-if [[ -z "$DAW" ]]; then
-    echo "Usage: $0 [--fresh] [--prefix DIR] <daw-binary> [args...]"
+if [[ "$CLEAN" != true && -z "$DAW" ]]; then
+    echo "Usage: $0 [--fresh] [--refresh-bridges] [--prefix DIR] <daw-binary> [args...]"
     echo "       $0 --clean"
     exit 1
 fi
-shift 1
+if [[ "$CLEAN" != true ]]; then
+    shift 1
+fi
 
-if ! command -v "$DAW" &>/dev/null; then
+if [[ "$CLEAN" != true ]] && ! command -v "$DAW" &>/dev/null; then
     echo "Error: '$DAW' not found in PATH" >&2
     exit 1
 fi
@@ -87,33 +97,49 @@ if [[ ! -d "$REAL_PREFIX" ]]; then
     exit 1
 fi
 REAL_PREFIX="$(realpath "$REAL_PREFIX")"
+if [[ "$REAL_PREFIX" == *$'\n'* || "$REAL_PREFIX" == *$'\r'* ]]; then
+    echo "Error: source prefix path contains an unsupported newline" >&2
+    exit 1
+fi
 if [[ ! -f "$REAL_PREFIX/system.reg" ]]; then
     echo "Error: $REAL_PREFIX does not look like a Wine prefix (no system.reg)" >&2
     exit 1
 fi
 
 # ── Clone the real prefix (reflink / copy-on-write) ──────────────────────────
-if [[ "$FRESH" == true ]]; then
-    rm -rf "$COPY"
+assert_separate_clone_paths "$REAL_PREFIX" "$COPY"
+assert_clone_destination_type "$COPY"
+acquire_clone_lock "$ROOT"
+trap release_clone_lock EXIT
+
+clone_exists=false
+if validate_clone_provenance "$COPY" "$REAL_PREFIX"; then
+    clone_exists=true
+else
+    clone_status=$?
+    if [[ "$clone_status" -ne 2 ]]; then
+        exit 1
+    fi
 fi
 
-if [[ -d "$COPY" ]]; then
+if [[ "$CLEAN" == true ]]; then
+    if [[ "$clone_exists" == true ]]; then
+        echo "Removing $COPY..."
+        remove_validated_clone "$COPY"
+        echo "Done."
+    else
+        echo "No clone to remove: $COPY"
+    fi
+    release_clone_lock
+    trap - EXIT
+    exit 0
+fi
+
+if [[ "$clone_exists" == true && "$FRESH" != true ]]; then
     echo "Reusing existing clone: $COPY (created $(date -r "$COPY" '+%Y-%m-%d %H:%M'))"
     echo "  (use --fresh to re-clone from $REAL_PREFIX)"
 else
-    echo "Cloning $REAL_PREFIX -> $COPY"
-    echo "  reflink copy-on-write — instant, near-zero disk, original only READ..."
-    # --reflink=always: fail loudly rather than silently doing a 42G real copy.
-    # -a: preserve symlinks (dosdevices/), perms, timestamps, xattrs.
-    if ! cp -a --reflink=always "$REAL_PREFIX" "$COPY"; then
-        echo "" >&2
-        echo "Error: reflink clone failed. This needs the project dir and the" >&2
-        echo "real prefix on the SAME btrfs/XFS filesystem. Aborting WITHOUT" >&2
-        echo "falling back to a plain copy — your original is untouched." >&2
-        rm -rf "$COPY"
-        exit 1
-    fi
-    echo "  Clone ready."
+    clone_prefix_atomic "$REAL_PREFIX" "$COPY" "$clone_exists"
 fi
 
 # ── Build the environment ────────────────────────────────────────────────────
@@ -135,6 +161,10 @@ for guard in "$HOME/.audio-production/winplugins" "$HOME/winplugins" "$HOME/.win
         exit 1
     fi
 done
+
+validate_clone_provenance "$COPY" "$REAL_PREFIX"
+release_clone_lock
+trap - EXIT
 
 # ── Launch ───────────────────────────────────────────────────────────────────
 echo ""

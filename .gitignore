@@ -4,6 +4,7 @@ build/
 # Wine prefix + COW clone of the real prefix
 prefix/
 prefix-copy/
+prefix-copy.new.*
 
 # Generated environment (absolute paths)
 env.sh
