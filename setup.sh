@@ -123,7 +123,21 @@ if [[ -n "$WINE_SHA256" && ! "$WINE_SHA256" =~ ^[A-Fa-f0-9]{64}$ ]]; then
 fi
 WINE_SHA256="${WINE_SHA256,,}"
 
-mkdir -p "$BUILD" "$PREFIX"
+mkdir -p "$BUILD"
+if ! command -v flock >/dev/null 2>&1 ||
+    ! flock --version >/dev/null 2>&1; then
+    err "flock is required for safe setup locking; install util-linux"
+    exit 1
+fi
+if ! exec {SETUP_LOCK_FD}> "$BUILD/.setup.lock"; then
+    err "Could not open the setup lock at $BUILD/.setup.lock"
+    exit 1
+fi
+if ! flock -n "$SETUP_LOCK_FD"; then
+    err "Another setup is already running for $ROOT"
+    exit 1
+fi
+mkdir -p "$PREFIX"
 cleanup_stale_wine_candidates
 
 STATE_WINE_VERSION="$(read_state WINE_VERSION "$STATE_FILE" || true)"

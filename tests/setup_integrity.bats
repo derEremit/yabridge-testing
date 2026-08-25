@@ -7,6 +7,33 @@ WINE_SHA="6c6f642b0954248493ebbd86ec232c46a6b9cf97c747ab3f1bcb707a22efed1d"
 
 setup() {
   setup_project_fixture
+  LOCK_HOLDER_PID=""
+  LOCK_RELEASE="$BATS_TEST_TMPDIR/release-setup-lock"
+  LOCK_READY="$BATS_TEST_TMPDIR/setup-lock-ready"
+}
+
+teardown() {
+  if [[ -n "$LOCK_HOLDER_PID" ]]; then
+    touch "$LOCK_RELEASE"
+    wait "$LOCK_HOLDER_PID"
+  fi
+}
+
+start_setup_lock_holder() {
+  (
+    exec 8> "$FIXTURE_ROOT/build/.setup.lock"
+    flock -n 8
+    touch "$LOCK_READY"
+    while [[ ! -e "$LOCK_RELEASE" ]]; do
+      sleep 0.05
+    done
+  ) &
+  LOCK_HOLDER_PID=$!
+  for _ in {1..100}; do
+    [[ -e "$LOCK_READY" ]] && return 0
+    sleep 0.05
+  done
+  return 1
 }
 
 assert_no_candidate_directories() {
@@ -127,4 +154,36 @@ assert_no_candidate_directories() {
   [ ! -e "$FIXTURE_ROOT/build/.wine-candidate.stale" ]
   [ -e "$FIXTURE_ROOT/build/.wine-candidate.unrecognized/keep" ]
   [ -f "$FIXTURE_ROOT/build/wine/prior-install" ]
+}
+
+@test "concurrent setup fails without deleting a live recognized candidate" {
+  seed_stale_candidate ".wine-candidate.live"
+  printf 'live-owner-data\n' \
+    > "$FIXTURE_ROOT/build/.wine-candidate.live/live-content"
+  start_setup_lock_holder
+
+  run_setup_fixture --no-wine --no-yabridge
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Another setup is already running"* ]]
+  [ -f "$FIXTURE_ROOT/build/.wine-candidate.live/.yabridge-candidate" ]
+  grep -q '^live-owner-data$' \
+    "$FIXTURE_ROOT/build/.wine-candidate.live/live-content"
+  [ ! -s "$CALLS" ]
+}
+
+@test "setup fails closed when flock is unavailable" {
+  seed_stale_candidate
+  cat > "$FAKE_BIN/flock" <<'EOF'
+#!/bin/bash
+exit 127
+EOF
+  chmod +x "$FAKE_BIN/flock"
+
+  run_setup_fixture --no-wine --no-yabridge
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"flock is required"* ]]
+  [ -e "$FIXTURE_ROOT/build/.wine-candidate.stale/stale-content" ]
+  [ ! -s "$CALLS" ]
 }
