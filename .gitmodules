@@ -1,0 +1,3 @@
+[submodule "yabridge-test-infra"]
+	path = yabridge-test-infra
+	url = git@github.com:derEremit/yabridge-test-infra.git

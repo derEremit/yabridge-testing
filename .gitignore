@@ -1,0 +1,22 @@
+# Build artifacts
+build/
+
+# Wine prefix + COW clone of the real prefix
+prefix/
+prefix-copy/
+
+# Generated environment (absolute paths)
+env.sh
+test.sh
+
+# Local editor and project metadata
+.claude/
+.index.yaml
+
+# Machine-specific investigation log
+AUDIT-LOG.md
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
