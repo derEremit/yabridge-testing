@@ -153,8 +153,12 @@ configure_sandbox() {
   assert_sandbox_namespaces
 }
 
+# Mirrors the launcher: the DAW is resolved by the preflight, and construction
+# is handed the canonical result. Tests that target the construction guards
+# themselves call build_bwrap_command directly instead.
 build_command() {
   SANDBOX_COMMAND=()
+  resolve_daw_executable "$1" || return 1
   build_bwrap_command SANDBOX_COMMAND "$@"
 }
 
@@ -303,6 +307,24 @@ sync_call_count() {
     return 0
   fi
   grep -c '^sync' "$CALLS" || true
+}
+
+# Everything a refused input must have left untouched. A rejected sandbox input
+# has to cost nothing: no clone, no clone candidate, no provenance marker, no
+# isolation tree, no bridge candidate, no yabridgectl sync and no DAW.
+refute_launcher_mutation() {
+  local leftovers
+  [ ! -e "$DAW_ENV_FILE" ]
+  [ ! -e "$COPY" ]
+  [ ! -e "$COPY/.yabridge-staging-source" ]
+  [ ! -e "$ISOLATION" ]
+  [ "$(sync_call_count)" -eq 0 ]
+  leftovers="$(find "$FIXTURE_ROOT" -maxdepth 1 \
+    \( -name 'prefix-copy.new.*' -o -name 'isolation.new.*' \) 2>/dev/null)"
+  if [[ -n "$leftovers" ]]; then
+    printf 'unexpected candidate left behind: %s\n' "$leftovers"
+    return 1
+  fi
 }
 
 # ── Argv array shape and argument fidelity ───────────────────────────────────
@@ -599,6 +621,59 @@ alias_plugin_root() {
   refute_exposed_source "$PRODUCTION_HOME/private-notes"
 }
 
+# Widening is what makes a self-contained installation usable, but inside the
+# real home the parent of `bin` is a home subtree holding far more than the
+# DAW, so no widening happens there at all.
+@test "sandbox never widens a home bin directory to a broader home subtree" {
+  load_sandbox
+  configure_sandbox
+  mkdir -p "$PRODUCTION_HOME/.local/bin" "$PRODUCTION_HOME/.local/share/keys"
+  printf '%s\n' 'secret' > "$PRODUCTION_HOME/.local/share/keys/token"
+  cp "$FIXTURE_BIN/fake-daw" "$PRODUCTION_HOME/.local/bin/studio"
+  chmod +x "$PRODUCTION_HOME/.local/bin/studio"
+
+  build_command "$PRODUCTION_HOME/.local/bin/studio"
+
+  assert_sequence --ro-bind "$PRODUCTION_HOME/.local/bin" \
+    "$PRODUCTION_HOME/.local/bin"
+  refute_sequence --ro-bind "$PRODUCTION_HOME/.local" "$PRODUCTION_HOME/.local"
+  refute_exposed_source "$PRODUCTION_HOME/.local/share/keys/token"
+  assert_read_only "$PRODUCTION_HOME/.local/bin/studio"
+}
+
+@test "sandbox never widens a nested home installation to its parent" {
+  load_sandbox
+  configure_sandbox
+  mkdir -p "$PRODUCTION_HOME/opt/Studio/bin" "$PRODUCTION_HOME/opt/Studio/lib"
+  printf '%s\n' 'library' > "$PRODUCTION_HOME/opt/Studio/lib/libstudio.so"
+  cp "$FIXTURE_BIN/fake-daw" "$PRODUCTION_HOME/opt/Studio/bin/studio"
+  chmod +x "$PRODUCTION_HOME/opt/Studio/bin/studio"
+
+  build_command "$PRODUCTION_HOME/opt/Studio/bin/studio"
+
+  assert_sequence --ro-bind "$PRODUCTION_HOME/opt/Studio/bin" \
+    "$PRODUCTION_HOME/opt/Studio/bin"
+  refute_sequence --ro-bind "$PRODUCTION_HOME/opt/Studio" \
+    "$PRODUCTION_HOME/opt/Studio"
+  refute_sequence --ro-bind "$PRODUCTION_HOME/opt" "$PRODUCTION_HOME/opt"
+  refute_exposed_source "$PRODUCTION_HOME/opt/Studio/lib/libstudio.so"
+}
+
+@test "sandbox still widens a self-contained installation outside the home" {
+  load_sandbox
+  configure_sandbox
+  local install="$BATS_TEST_TMPDIR/apps/Outside"
+  mkdir -p "$install/bin" "$install/lib"
+  printf '%s\n' 'library' > "$install/lib/libstudio.so"
+  cp "$FIXTURE_BIN/fake-daw" "$install/bin/studio"
+  chmod +x "$install/bin/studio"
+
+  build_command "$install/bin/studio"
+
+  assert_sequence --ro-bind "$install" "$install"
+  assert_read_only "$install/lib/libstudio.so"
+}
+
 @test "sandbox refuses a DAW install root at the filesystem root" {
   load_sandbox
   configure_sandbox
@@ -648,6 +723,17 @@ alias_plugin_root() {
   [ "$SANDBOX_DAW_PATH" = "$FIXTURE_BIN/fake-daw" ]
 }
 
+@test "command construction requires a DAW the preflight already resolved" {
+  load_sandbox
+  configure_sandbox
+  SANDBOX_DAW_PATH=""
+
+  run build_bwrap_command SANDBOX_COMMAND "$FIXTURE_BIN/fake-daw"
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"preflight"* ]]
+}
+
 @test "command construction refuses a DAW that resolves elsewhere after the preflight" {
   load_sandbox
   configure_sandbox
@@ -657,7 +743,8 @@ alias_plugin_root() {
   cp "$FIXTURE_BIN/fake-daw" "$BATS_TEST_TMPDIR/shadow-bin/fake-daw"
   chmod +x "$BATS_TEST_TMPDIR/shadow-bin/fake-daw"
 
-  PATH="$BATS_TEST_TMPDIR/shadow-bin:$PATH" run build_command fake-daw
+  PATH="$BATS_TEST_TMPDIR/shadow-bin:$PATH" \
+    run build_bwrap_command SANDBOX_COMMAND fake-daw
 
   [ "$status" -ne 0 ]
   [[ "$output" == *"preflight"* ]]
@@ -670,10 +757,59 @@ alias_plugin_root() {
   resolve_daw_executable fake-daw
   rm -f "$FIXTURE_BIN/fake-daw"
 
-  run build_command fake-daw
+  run build_bwrap_command SANDBOX_COMMAND fake-daw
 
   [ "$status" -ne 0 ]
   [[ "$output" == *"not found"* ]]
+}
+
+# ── Input preflight, before anything is cloned or generated ──────────────────
+
+@test "input preflight accepts a resolved DAW and real plugin roots" {
+  load_sandbox
+  configure_sandbox
+  resolve_daw_executable fake-daw
+
+  run assert_sandbox_inputs
+
+  [ "$status" -eq 0 ]
+}
+
+@test "input preflight refuses a DAW installed directly in the real home" {
+  load_sandbox
+  configure_sandbox
+  cp "$FIXTURE_BIN/fake-daw" "$PRODUCTION_HOME/studio"
+  chmod +x "$PRODUCTION_HOME/studio"
+  resolve_daw_executable "$PRODUCTION_HOME/studio"
+
+  run assert_sandbox_inputs
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"install root"* ]]
+}
+
+@test "input preflight refuses an unusable plugin-root alias" {
+  load_sandbox
+  configure_sandbox
+  resolve_daw_executable fake-daw
+  rm -rf "$PRODUCTION_HOME/.vst"
+  ln -s "$BATS_TEST_TMPDIR/absent-vst" "$PRODUCTION_HOME/.vst"
+
+  run assert_sandbox_inputs
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"plugin root"* ]]
+}
+
+@test "input preflight requires a resolved DAW" {
+  load_sandbox
+  configure_sandbox
+  SANDBOX_DAW_PATH=""
+
+  run assert_sandbox_inputs
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"preflight"* ]]
 }
 
 # ── Mount plan conflicts ─────────────────────────────────────────────────────
@@ -1077,6 +1213,43 @@ $BATS_TEST_TMPDIR"
   [ ! -e "$DAW_ENV_FILE" ]
   [ ! -e "$COPY/.yabridge-staging-source" ]
   [ "$(sync_call_count)" -eq 0 ]
+}
+
+# The install root and the production plugin roots decide what the sandbox will
+# expose, so they are inputs to validate, not results to discover after the
+# prefix has already been cloned and bridges generated.
+@test "launcher refuses a DAW installed directly in the real home before cloning" {
+  cp "$FIXTURE_BIN/fake-daw" "$PRODUCTION_HOME/studio"
+  chmod +x "$PRODUCTION_HOME/studio"
+
+  run_daw_fixture --prefix "$REAL_PREFIX" "$PRODUCTION_HOME/studio"
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"install root"* ]]
+  [[ "$output" == *"home"* ]]
+  refute_launcher_mutation
+}
+
+@test "launcher refuses a broken plugin-root alias before cloning" {
+  rm -rf "$PRODUCTION_HOME/.vst"
+  ln -s "$BATS_TEST_TMPDIR/absent-vst" "$PRODUCTION_HOME/.vst"
+
+  run_daw_fixture --prefix "$REAL_PREFIX" fake-daw
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"plugin root"* ]]
+  refute_launcher_mutation
+}
+
+@test "launcher refuses a plugin-root alias widening to the real home before cloning" {
+  rm -rf "$PRODUCTION_HOME/.clap"
+  ln -s "$PRODUCTION_HOME" "$PRODUCTION_HOME/.clap"
+
+  run_daw_fixture --prefix "$REAL_PREFIX" fake-daw
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"plugin root"* ]]
+  refute_launcher_mutation
 }
 
 @test "launcher rejects a missing writable path value" {

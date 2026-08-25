@@ -167,9 +167,11 @@ if [[ ! -f "$REAL_PREFIX/system.reg" ]]; then
 fi
 
 # ── Prove the sandbox boundary before touching or generating anything ────────
-# The DAW is resolved, Bubblewrap is required and its namespaces are probed
-# before the prefix is cloned and before yabridgectl runs. A host that cannot
-# enforce the boundary therefore never reaches a DAW, a clone or a bridge sync.
+# The DAW is resolved, Bubblewrap is required, its namespaces are probed and
+# every sandbox input is validated before the prefix is cloned and before
+# yabridgectl runs. A host that cannot enforce the boundary, and an input the
+# boundary would have to refuse, therefore never reaches a DAW, a clone, a
+# clone candidate or a bridge sync.
 SANDBOX_PROJECT_ROOT="$ROOT"
 SANDBOX_REAL_PREFIX="$REAL_PREFIX"
 SANDBOX_CLONE="$COPY"
@@ -178,6 +180,7 @@ if [[ "$CLEAN" != true ]]; then
     resolve_daw_executable "$DAW" || exit 1
     require_bwrap || exit 1
     assert_sandbox_namespaces || exit 1
+    assert_sandbox_inputs || exit 1
     for requested in ${REQUESTED_WRITABLE_PATHS[@]+"${REQUESTED_WRITABLE_PATHS[@]}"}; do
         validate_writable_path "$requested" || exit 2
         SANDBOX_WRITABLE_PATHS+=("$requested")

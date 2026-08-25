@@ -109,7 +109,7 @@ sandbox_assert_plain_path() {
 # alone would accept that storage under its real name — handing the caller a
 # writable bind onto production bridges.
 sandbox_protected_trees() {
-    local tree name canonical
+    local tree name
 
     for tree in "${SANDBOX_PROTECTED_SYSTEM_TREES[@]}"; do
         printf '%s\n' "$tree"
@@ -249,7 +249,11 @@ sandbox_daw_install_root() {
 
     directory="$(dirname -- "$executable")"
     root="$directory"
-    if [[ "$(basename -- "$directory")" == bin ]]; then
+    # Inside the real home there is no widening at all: the parent of a `bin`
+    # directory there is a home subtree such as ~/.local, which holds far more
+    # than the DAW. Only installations outside the home are widened.
+    if [[ "$(basename -- "$directory")" == bin ]] &&
+        ! sandbox_path_within "$directory" "$HOME"; then
         parent="$(dirname -- "$directory")"
         if [[ "$parent" != / ]] && ! sandbox_path_within "$HOME" "$parent"; then
             root="$parent"
@@ -265,6 +269,30 @@ sandbox_daw_install_root() {
         return 1
     fi
     printf '%s\n' "$root"
+}
+
+sandbox_require_resolved_daw() {
+    if [[ -z "$SANDBOX_DAW_PATH" ]]; then
+        sandbox_error "the DAW was not resolved by the preflight; refusing to plan a sandbox"
+        return 1
+    fi
+}
+
+# The inputs that decide what the sandbox will expose, checked while refusing
+# is still free. Every check here is repeated where it is enforced, as the
+# command is built; the point of this pass is only to move a refusal in front
+# of the clone and the bridge sync, so a rejected input costs the user nothing
+# and leaves no state behind.
+assert_sandbox_inputs() {
+    local name root
+
+    sandbox_require_resolved_daw || return 1
+    sandbox_daw_install_root "$SANDBOX_DAW_PATH" > /dev/null || return 1
+    for name in "${SANDBOX_PLUGIN_ROOT_NAMES[@]}"; do
+        root="$HOME/$name"
+        [[ -e "$root" || -L "$root" ]] || continue
+        sandbox_plugin_root_target "$root" > /dev/null || return 1
+    done
 }
 
 # Confirms a command is being built for the executable the preflight already
@@ -579,6 +607,9 @@ build_bwrap_command() {
         sandbox_error "sandbox namespace support was not verified; refusing to build a sandbox command"
         return 1
     fi
+    # Construction never resolves a DAW from scratch. The preflight owns that
+    # decision, and this only ever confirms it.
+    sandbox_require_resolved_daw || return 1
 
     local __sandbox_project __sandbox_prefix __sandbox_clone
     local __sandbox_isolation __sandbox_home

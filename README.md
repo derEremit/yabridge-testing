@@ -169,7 +169,7 @@ narrower ones.
 | project tree (this repo) | read-only | wine 11.8, test yabridge, `env.sh` |
 | production Wine prefix | **read-only** | never written, never upgraded |
 | `~/.vst`, `~/.vst3`, `~/.clap` | **read-only** | production bridges cannot be modified, and are not on any plugin path. A plugin root that is a symlink is exposed read-only at its canonical target, so storage elsewhere is protected under its real name too |
-| DAW install root, `--native-plugin-path` | read-only | the DAW's own files |
+| DAW install root, `--native-plugin-path` | read-only | the DAW's own files. A `bin` directory is widened to the install root beside it, but never inside your home — a DAW under `~/…/bin` gets that `bin` directory alone |
 | `prefix-copy/` | writable | the validated clone |
 | `isolation/` | writable | the isolated HOME/XDG and bridge tree |
 | `--writable-path DIR` | writable | your projects and rendered output |
@@ -398,6 +398,15 @@ sudo sysctl -w kernel.unprivileged_userns_clone=1   # persist in /etc/sysctl.d
 or install a setuid `bwrap` (`bubblewrap-suid` on some distros). The launcher
 retries without a user namespace automatically, so a setuid `bwrap` works
 without any flag. It will not launch your DAW unsandboxed.
+
+### A home-installed DAW cannot find its own libraries
+
+Outside your home, a DAW at `/opt/Studio/bin/studio` gets all of
+`/opt/Studio`, so its sibling `lib/` comes with it. Inside your home nothing is
+widened — `~/opt/Studio/bin/studio` gets only `~/opt/Studio/bin` — because the
+parent of a `bin` directory in your home is usually a directory like
+`~/.local` that holds far more than the DAW. Install such a DAW outside your
+home (`/opt` is already read-only in full) rather than loosening the boundary.
 
 ### The DAW cannot save a project
 
