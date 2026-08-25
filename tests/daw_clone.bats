@@ -40,7 +40,11 @@ EOF
 set -euo pipefail
 source_path="${@: -2:1}"
 destination="${@: -1}"
-printf '%s -> %s\n' "$source_path" "$destination" >> "$DAW_TEST_CP_CALLS"
+{
+  printf 'argv'
+  printf ' %q' "$@"
+  printf '\n'
+} >> "$DAW_TEST_CP_CALLS"
 /bin/cp -a "$source_path" "$destination"
 if [[ "${DAW_TEST_REPLACE_SOURCE_AFTER_COPY:-false}" == true ]]; then
   rm -rf "$source_path"
@@ -206,6 +210,34 @@ write_provenance() {
   [ -f "$FIXTURE_ROOT/prefix-copy/source/system.reg" ]
 }
 
+@test "launcher canonicalizes a symlinked launch path before nesting checks" {
+  local real_root="$SOURCE/launcher-real"
+  local linked_root="$BATS_TEST_TMPDIR/launcher-link"
+  mv "$FIXTURE_ROOT" "$real_root"
+  ln -s "$real_root" "$linked_root"
+
+  run "$linked_root/daw-env.sh" --prefix "$SOURCE" fake-daw
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"source and clone paths must not be nested"* ]]
+  [ ! -e "$CALLS" ]
+  [ ! -e "$real_root/prefix-copy" ]
+  ! compgen -G "$real_root/prefix-copy.new.*" >/dev/null
+  [ -f "$SOURCE/system.reg" ]
+}
+
+@test "clone creation requires the reflink-always copy argument" {
+  run_daw_fixture --prefix "$SOURCE" fake-daw
+
+  [ "$status" -eq 0 ]
+  local copy_argv
+  copy_argv="$(cat "$CALLS")"
+  [[ "$copy_argv" == *" --reflink=always "* ]]
+  [[ "$copy_argv" == *" -a "* ]]
+  [[ "$copy_argv" == *" $SOURCE "* ]]
+  [[ "$copy_argv" == *" $FIXTURE_ROOT/prefix-copy.new."* ]]
+}
+
 @test "failed reflink copy removes only its temporary clone" {
   export DAW_TEST_CP_FAIL=true
 
@@ -244,6 +276,54 @@ write_provenance() {
   [ "$status" -ne 0 ]
   [ "$(cat "$FIXTURE_ROOT/prefix-copy/existing")" = "existing clone" ]
   [ -f "$FIXTURE_ROOT/prefix-copy/.yabridge-staging-source" ]
+}
+
+@test "successful fresh clone atomically replaces content and provenance" {
+  printf '%s\n' 'old source data' > "$SOURCE/source-sentinel"
+  run_daw_fixture --prefix "$SOURCE" fake-daw
+  [ "$status" -eq 0 ]
+  printf '%s\n' 'old clone only' > "$FIXTURE_ROOT/prefix-copy/old-only"
+  printf '%s\n' 'new source data' > "$SOURCE/source-sentinel"
+
+  run_daw_fixture --fresh --prefix "$SOURCE" fake-daw
+
+  [ "$status" -eq 0 ]
+  [ "$(cat "$FIXTURE_ROOT/prefix-copy/source-sentinel")" = "new source data" ]
+  [ ! -e "$FIXTURE_ROOT/prefix-copy/old-only" ]
+  mapfile -t provenance < "$FIXTURE_ROOT/prefix-copy/.yabridge-staging-source"
+  local device inode
+  read -r device inode <<< "$(source_identity "$SOURCE")"
+  [ "${provenance[0]}" = "$(realpath "$SOURCE")" ]
+  [ "${provenance[1]}" = "$device" ]
+  [ "${provenance[2]}" = "$inode" ]
+  ! compgen -G "$FIXTURE_ROOT/prefix-copy.new.*" >/dev/null
+}
+
+@test "fresh fails before copying when GNU mv lacks atomic exchange" {
+  run_daw_fixture --prefix "$SOURCE" fake-daw
+  [ "$status" -eq 0 ]
+  printf '%s\n' 'existing clone' > "$FIXTURE_ROOT/prefix-copy/existing"
+  cat > "$FIXTURE_BIN/mv" <<'EOF'
+#!/bin/bash
+if [[ "${1:-}" == "--help" ]]; then
+  printf '%s\n' 'Usage: mv SOURCE DEST'
+  exit 0
+fi
+for argument in "$@"; do
+  [[ "$argument" == "--exchange" ]] && exit 64
+done
+exec /bin/mv "$@"
+EOF
+  chmod +x "$FIXTURE_BIN/mv"
+
+  run_daw_fixture --fresh --prefix "$SOURCE" fake-daw
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"GNU coreutils mv with --exchange support is required"* ]]
+  [[ "$output" == *"install or update GNU coreutils"* ]]
+  [ "$(wc -l < "$CALLS")" -eq 1 ]
+  [ "$(cat "$FIXTURE_ROOT/prefix-copy/existing")" = "existing clone" ]
+  ! compgen -G "$FIXTURE_ROOT/prefix-copy.new.*" >/dev/null
 }
 
 @test "refresh bridges is accepted independently without refreshing the clone" {
@@ -307,6 +387,27 @@ write_provenance() {
   [ "$status" -ne 0 ]
   [[ "$output" == *"clone belongs to a different source prefix"* ]]
   [ -d "$FIXTURE_ROOT/prefix-copy" ]
+  [ -f "$SOURCE/system.reg" ]
+  [ -f "$source_b/system.reg" ]
+}
+
+@test "fresh mismatch refusal names safe manual recovery steps" {
+  local source_b="$BATS_TEST_TMPDIR/source-b"
+  make_prefix "$source_b"
+  run_daw_fixture --prefix "$SOURCE" fake-daw
+  [ "$status" -eq 0 ]
+
+  run_daw_fixture --fresh --prefix "$source_b" fake-daw
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"clone belongs to a different source prefix"* ]]
+  [[ "$output" == *"$FIXTURE_ROOT/prefix-copy"* ]]
+  [[ "$output" == *"left untouched"* ]]
+  [[ "$output" == *"cat --"*".yabridge-staging-source"* ]]
+  [[ "$output" == *"stat -Lc"*"$source_b"* ]]
+  [[ "$output" == *"only after verifying"* ]]
+  [[ "$output" == *"rm -rf --"*"$FIXTURE_ROOT/prefix-copy"* ]]
+  [ -f "$FIXTURE_ROOT/prefix-copy/source-sentinel" ]
   [ -f "$SOURCE/system.reg" ]
   [ -f "$source_b/system.reg" ]
 }

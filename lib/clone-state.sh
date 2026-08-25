@@ -21,6 +21,23 @@ clone_path_identity() {
     stat -c '%d %i' "$1"
 }
 
+report_provenance_mismatch() {
+    local clone="$1"
+    local source="$2"
+    local clone_quoted provenance_quoted source_quoted
+
+    printf -v clone_quoted '%q' "$clone"
+    printf -v provenance_quoted '%q' "$clone/$CLONE_PROVENANCE_NAME"
+    printf -v source_quoted '%q' "$source"
+
+    clone_state_error "clone belongs to a different source prefix: $clone"
+    echo "The clone was left untouched. Verify its recorded source and current source identity:" >&2
+    echo "  cat -- $provenance_quoted" >&2
+    echo "  stat -Lc 'device=%d inode=%i' -- $source_quoted" >&2
+    echo "Remove it only after verifying that it is safe and disposable:" >&2
+    echo "  rm -rf -- $clone_quoted" >&2
+}
+
 assert_separate_clone_paths() {
     local source="$1"
     local clone="$2"
@@ -125,7 +142,7 @@ validate_clone_provenance() {
     if [[ "${fields[0]}" != "$source" ||
           "${fields[1]}" != "$expected_device" ||
           "${fields[2]}" != "$expected_inode" ]]; then
-        clone_state_error "clone belongs to a different source prefix"
+        report_provenance_mismatch "$clone" "$source"
         return 1
     fi
 
@@ -150,6 +167,14 @@ cleanup_owned_clone_candidate() {
     OWNED_CLONE_CANDIDATE=""
 }
 
+require_atomic_exchange() {
+    if ! mv --help 2>/dev/null | grep -Fq -- '--exchange'; then
+        clone_state_error "GNU coreutils mv with --exchange support is required for atomic --fresh"
+        echo "Please install or update GNU coreutils before refreshing this clone." >&2
+        return 1
+    fi
+}
+
 clone_prefix_atomic() {
     local source="$1"
     local clone="$2"
@@ -158,6 +183,9 @@ clone_prefix_atomic() {
     local expected_source_identity
 
     expected_source_identity="$(source_identity "$source")"
+    if [[ "$replace_existing" == true ]]; then
+        require_atomic_exchange || return 1
+    fi
 
     if path_exists "$candidate"; then
         clone_state_error "temporary clone path already exists; refusing ambiguous cleanup: $candidate"

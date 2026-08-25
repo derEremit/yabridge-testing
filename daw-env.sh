@@ -37,8 +37,9 @@
 
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")" && pwd)"
-COPY="$ROOT/prefix-copy"
+SCRIPT_PATH="$(realpath -- "$0")"
+ROOT="$(cd -P -- "$(dirname -- "$SCRIPT_PATH")" && pwd -P)"
+COPY="$(realpath -m -- "$ROOT")/prefix-copy"
 REAL_PREFIX="$HOME/.audio-production/winplugins"
 FRESH=false
 CLEAN=false
