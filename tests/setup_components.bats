@@ -120,6 +120,10 @@ EOF
 
   cat > "$FAKE_BIN/python3" <<'EOF'
 #!/bin/bash
+if [[ "$1" == "-" ]]; then
+  while IFS= read -r _; do :; done
+  exit 0
+fi
 if [[ "$1" == "-m" && "$2" == "venv" ]]; then
   mkdir -p "$3/bin"
   cp "$0" "$3/bin/python"

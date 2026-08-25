@@ -21,6 +21,46 @@ info()  { echo -e "${CYAN}[*]${NC} $1"; }
 ok()    { echo -e "${GREEN}[✓]${NC} $1"; }
 err()   { echo -e "${RED}[✗]${NC} $1"; }
 
+WINE_CANDIDATE_ROOT=""
+
+is_owned_wine_candidate() {
+    local candidate="$1"
+    [[ -n "$candidate" &&
+        "$candidate" == "$BUILD"/.wine-candidate.* &&
+        -d "$candidate" &&
+        ! -L "$candidate" ]]
+}
+
+cleanup_current_wine_candidate() {
+    local status=$?
+    trap - EXIT INT TERM
+    if is_owned_wine_candidate "$WINE_CANDIDATE_ROOT"; then
+        rm -rf -- "$WINE_CANDIDATE_ROOT"
+    fi
+    return "$status"
+}
+
+cleanup_stale_wine_candidates() (
+    local candidate marker candidate_path active_path
+    shopt -s nullglob
+    for candidate in "$BUILD"/.wine-candidate.*; do
+        marker="$candidate/.yabridge-candidate"
+        is_owned_wine_candidate "$candidate" || continue
+        [[ -f "$marker" && ! -L "$marker" ]] || continue
+        case "$(< "$marker")" in
+            yabridge-wine-candidate-v1:pre-exchange | \
+                yabridge-wine-candidate-v1:post-exchange) ;;
+            *) continue ;;
+        esac
+        if [[ -e "$WINE_DIR" ]]; then
+            candidate_path="$(realpath -e -- "$candidate")" || continue
+            active_path="$(realpath -e -- "$WINE_DIR")" || continue
+            [[ "$candidate_path" != "$active_path" ]] || continue
+        fi
+        rm -rf -- "$candidate"
+    done
+)
+
 usage() {
     local status="${1:-1}"
     echo "Usage: $0 [--wine-version VERSION] [--wine-sha256 SHA256] [--yabridge-branch BRANCH] [--no-wine] [--no-yabridge]"
@@ -84,6 +124,7 @@ fi
 WINE_SHA256="${WINE_SHA256,,}"
 
 mkdir -p "$BUILD" "$PREFIX"
+cleanup_stale_wine_candidates
 
 STATE_WINE_VERSION="$(read_state WINE_VERSION "$STATE_FILE" || true)"
 STATE_WINE_SHA256="$(read_state WINE_SHA256 "$STATE_FILE" || true)"
@@ -167,10 +208,14 @@ for r in releases:
         info "Downloading wine-staging (Kron4ek prebuilt)..."
         TARBALL="$BUILD/wine-${WINE_VER}-staging-amd64.tar.xz"
         WINE_CANDIDATE_ROOT="$(mktemp -d "$BUILD/.wine-candidate.XXXXXX")"
+        trap cleanup_current_wine_candidate EXIT
+        trap 'exit 130' INT
+        trap 'exit 143' TERM
+        printf 'yabridge-wine-candidate-v1:pre-exchange\n' \
+            > "$WINE_CANDIDATE_ROOT/.yabridge-candidate"
         WINE_CANDIDATE_ARCHIVE="$WINE_CANDIDATE_ROOT/wine.tar.xz"
         info "Downloading $WINE_URL..."
         curl -fsSL -o "$WINE_CANDIDATE_ARCHIVE" "$WINE_URL" || {
-            rm -rf "$WINE_CANDIDATE_ROOT"
             err "Download failed. Try a different version."
             err "See: https://github.com/Kron4ek/Wine-Builds/releases"
             exit 1
@@ -179,14 +224,12 @@ for r in releases:
         if [[ -n "$WINE_SHA256" ]]; then
             if ! printf '%s  %s\n' "$WINE_SHA256" "$WINE_CANDIDATE_ARCHIVE" |
                 sha256sum -c - >/dev/null; then
-                rm -rf "$WINE_CANDIDATE_ROOT"
                 err "Wine archive checksum mismatch"
                 exit 1
             fi
             ACTUAL_WINE_SHA256="$WINE_SHA256"
         else
             ACTUAL_WINE_SHA256="$(sha256sum "$WINE_CANDIDATE_ARCHIVE")" || {
-                rm -rf "$WINE_CANDIDATE_ROOT"
                 err "Could not calculate Wine archive SHA-256"
                 exit 1
             }
@@ -194,37 +237,76 @@ for r in releases:
         fi
 
         if ! ARCHIVE_ENTRIES="$(tar -tf "$WINE_CANDIDATE_ARCHIVE")"; then
-            rm -rf "$WINE_CANDIDATE_ROOT"
             err "Could not inspect Wine archive"
             exit 1
         fi
         while IFS= read -r ARCHIVE_ENTRY; do
             if [[ "$ARCHIVE_ENTRY" == /* ||
                 "$ARCHIVE_ENTRY" =~ (^|/)\.\.(/|$) ]]; then
-                rm -rf "$WINE_CANDIDATE_ROOT"
                 err "Wine archive contains an unsafe path: $ARCHIVE_ENTRY"
                 exit 1
             fi
         done <<< "$ARCHIVE_ENTRIES"
 
+        if ! ARCHIVE_LINK_ERROR="$(python3 - "$WINE_CANDIDATE_ARCHIVE" 2>&1 <<'PY'
+import pathlib
+import sys
+import tarfile
+
+archive = sys.argv[1]
+
+def is_unsafe(path):
+    return path.startswith("/") or ".." in pathlib.PurePosixPath(path).parts
+
+try:
+    with tarfile.open(archive, "r:*") as contents:
+        for member in contents:
+            if (member.issym() or member.islnk()) and is_unsafe(member.linkname):
+                print(
+                    f"Wine archive contains an unsafe link target: "
+                    f"{member.name} -> {member.linkname}"
+                )
+                raise SystemExit(1)
+except (OSError, tarfile.TarError) as error:
+    print(f"Could not inspect Wine archive links: {error}")
+    raise SystemExit(1)
+PY
+        )"; then
+            err "$ARCHIVE_LINK_ERROR"
+            exit 1
+        fi
+
         info "Extracting wine-staging $WINE_VER..."
         if ! tar -xaf "$WINE_CANDIDATE_ARCHIVE" -C "$WINE_CANDIDATE_ROOT/"; then
-            rm -rf "$WINE_CANDIDATE_ROOT"
             err "Extraction failed"
             exit 1
         fi
         EXTRACTED_DIR="$(find "$WINE_CANDIDATE_ROOT" -mindepth 1 -maxdepth 1 \
             -type d -name '*staging*' -print -quit)"
         if [[ -z "$EXTRACTED_DIR" ]]; then
-            rm -rf "$WINE_CANDIDATE_ROOT"
             err "Extraction failed — could not find wine directory"
             exit 1
         fi
-        if [[ ! -x "$EXTRACTED_DIR/bin/wine" ||
-            ! -x "$EXTRACTED_DIR/bin/wineboot" ||
-            ! -x "$EXTRACTED_DIR/bin/wineserver" ]] ||
+        WINE_CANDIDATE_VALID=true
+        EXTRACTED_CANONICAL="$(realpath -e -- "$EXTRACTED_DIR")" ||
+            WINE_CANDIDATE_VALID=false
+        for WINE_COMMAND in wine wineboot wineserver; do
+            WINE_EXECUTABLE="$EXTRACTED_DIR/bin/$WINE_COMMAND"
+            if [[ ! -f "$WINE_EXECUTABLE" ||
+                -L "$WINE_EXECUTABLE" ||
+                ! -x "$WINE_EXECUTABLE" ]]; then
+                WINE_CANDIDATE_VALID=false
+                continue
+            fi
+            WINE_EXECUTABLE_CANONICAL="$(realpath -e -- "$WINE_EXECUTABLE")" ||
+                WINE_CANDIDATE_VALID=false
+            if [[ "$WINE_CANDIDATE_VALID" == true &&
+                "$WINE_EXECUTABLE_CANONICAL" != "$EXTRACTED_CANONICAL"/* ]]; then
+                WINE_CANDIDATE_VALID=false
+            fi
+        done
+        if [[ "$WINE_CANDIDATE_VALID" != true ]] ||
             ! "$EXTRACTED_DIR/bin/wine" --version >/dev/null 2>&1; then
-            rm -rf "$WINE_CANDIDATE_ROOT"
             err "Extracted Wine candidate failed validation"
             exit 1
         fi
@@ -232,18 +314,20 @@ for r in releases:
         mv -f "$WINE_CANDIDATE_ARCHIVE" "$TARBALL"
         if [[ -e "$WINE_DIR" ]]; then
             if ! mv --exchange --no-copy -T "$EXTRACTED_DIR" "$WINE_DIR"; then
-                rm -rf "$WINE_CANDIDATE_ROOT"
                 err "Could not atomically activate Wine candidate"
                 exit 1
             fi
         else
             if ! mv --no-copy -T "$EXTRACTED_DIR" "$WINE_DIR"; then
-                rm -rf "$WINE_CANDIDATE_ROOT"
                 err "Could not activate Wine candidate"
                 exit 1
             fi
         fi
-        rm -rf "$WINE_CANDIDATE_ROOT"
+        printf 'yabridge-wine-candidate-v1:post-exchange\n' \
+            > "$WINE_CANDIDATE_ROOT/.yabridge-candidate"
+        rm -rf -- "$WINE_CANDIDATE_ROOT"
+        WINE_CANDIDATE_ROOT=""
+        trap - EXIT INT TERM
         ok "Wine-staging $WINE_VER extracted to $WINE_DIR"
 
         STATE_WINE_VERSION="$WINE_VER"
