@@ -49,7 +49,8 @@ isolation. No system files are touched — everything lives in `build/`,
 ├── run-state/        # created by daw-env.sh, never writable inside the sandbox
 │   └── run-manifest.json  # what the last launch actually was
 └── yabridge-test-infra/
-    └── test-harness/  # Python test harness CLI
+    ├── test-harness/  # Python test harness CLI
+    └── web/           # results server (ops: web/README.md)
 ```
 
 ## Setup
@@ -698,6 +699,8 @@ manually.
 - [yabridge](https://github.com/robbert-vdh/yabridge) — the plugin bridge
 - [yabridge-test-infra](./yabridge-test-infra/) — VM-based testing (Packer,
   Ansible, results server)
+- [Results server operations](./yabridge-test-infra/web/README.md) — Fly.io +
+  SQLite security, quotas, and operator settings
 - [Kron4ek Wine-Builds](https://github.com/Kron4ek/Wine-Builds) — prebuilt wine
   binaries
 - [Issue #409](https://github.com/robbert-vdh/yabridge/issues/409) — Wine 10
