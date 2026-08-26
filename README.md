@@ -124,10 +124,23 @@ isolated wine + yabridge. Your system yabridge is never touched.
 
 ```bash
 ./test.sh info              # collect environment info
-./test.sh validate          # mouse coordinate validation
+./test.sh validate          # pointer prerequisite + bridged coordinate matrix
+./test.sh probe --scenario offset --samples 3 --json
 ./test.sh suite             # full test suite
 ./test.sh plugin ~/foo.vst3 # test a specific plugin
 ```
+
+The deterministic coordinate probe is a Windows CLAP fixture exercised first
+under pure Wine and then through yabridge. It uses temporary Wine prefixes and
+headless X servers by default; an existing display is touched only with
+`--no-headless --allow-pointer-warp`. Missing optional prerequisites produce
+`SKIP`, harness failures produce `ERROR`, and completed coordinate mismatches
+produce `FAIL`; all unsuccessful or empty executions exit nonzero.
+
+Build the pinned native and MinGW probe artifacts before running `probe` or
+`validate`. Exact dependencies, build commands, scenario semantics, raw
+measurements, and troubleshooting are documented in
+[the coordinate probe guide](./yabridge-test-infra/docs/coord-probe.md).
 
 ### Launch a DAW against a COW clone of your real prefix
 
