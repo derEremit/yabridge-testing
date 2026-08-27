@@ -125,8 +125,8 @@ isolated wine + yabridge. Your system yabridge is never touched.
 
 ```bash
 ./test.sh info              # collect environment info
-./test.sh validate          # pointer prerequisite + bridged coordinate matrix
 ./test.sh probe --scenario offset --samples 3 --json
+./test.sh validate          # pointer prerequisite + bridged coordinate matrix
 ./test.sh suite             # full test suite
 ./test.sh plugin ~/foo.vst3 # test a specific plugin
 ```
@@ -147,8 +147,7 @@ measurements, and troubleshooting are documented in
 
 `daw-env.sh` runs your DAW with wine 11.8 + test yabridge, pointed at a
 **copy-on-write clone** of your real Wine prefix, inside a Bubblewrap sandbox
-where your production state is mounted read-only. Your original prefix is only
-ever *read* — never written, never upgraded, never modified.
+where your production state is mounted read-only.
 
 Requires `bubblewrap` 0.11+ and a kernel that lets it create namespaces
 (unprivileged user namespaces, or a setuid `bwrap`). Without that, the launcher
@@ -187,12 +186,12 @@ refuses to start your DAW rather than running it unsandboxed.
 6. `exec`s the sandbox. Your DAW arguments are passed through unchanged — no
    shell re-parses them.
 
-**Why this is safe:** yabridge's `find_wine_prefix()` checks `WINEPREFIX`
-first and uses it as an override for *every* plugin, so no plugin resolves
-back to a real prefix. Wine 11.8 will auto-upgrade the prefix on first run
-(registry + system DLLs) — that upgrade and every plugin write land on COW
-extents inside `prefix-copy/`. The original prefix's data blocks are
-physically never touched.
+**Why this is safe:** the launcher refuses to start without `bwrap`.
+Production prefix and plugin roots are mounted read-only, and the bridges
+used for the run resolve inside the clone. Wine 11.8 will auto-upgrade the
+prefix on first run (registry + system DLLs) — that upgrade and every
+plugin write land on COW extents inside `prefix-copy/`. `WINEPREFIX` is how
+Wine finds that clone; it is not the isolation boundary.
 
 **The chain:**
 ```
@@ -558,12 +557,12 @@ a globally installed command.
 
 ### `daw-env.sh`
 
-Safe DAW launcher. Reflink-clones your real Wine prefix into `prefix-copy/`
-(copy-on-write — the original is only read), exports `WINEPREFIX` to the
-clone, generates clone-only bridges into `isolation/home/`, and launches the
-DAW inside a Bubblewrap sandbox where the production prefix and production
-plugin roots are read-only. No file swaps, no backups, no restore, no traps —
-your original prefix is physically never modified.
+Safe DAW launcher. Reflink-clones your real Wine prefix into `prefix-copy/`,
+exports `WINEPREFIX` to the clone, generates clone-only bridges into
+`isolation/home/`, and launches the DAW inside a Bubblewrap sandbox. The
+launcher refuses to start without `bwrap`; production prefix and plugin
+roots are mounted read-only; bridges used for the run resolve inside the
+clone. `WINEPREFIX` is not the isolation boundary.
 
 Flags: `--fresh` (re-clone), `--clean` (delete clone), `--prefix DIR` (clone a
 different prefix), `--native-plugin-path DIR` (expose a native plugin
@@ -685,14 +684,37 @@ The sandbox has no network by default. Run the activation once with
 
 ### Wayland + xdotool
 
-Mouse coordinate tests (`yabridge-test validate`) may not work under pure
-Wayland because `xdotool` depends on XTest. Run under X11 or XWayland.
+Mouse coordinate tests (`yabridge-test probe`; `validate` is a secondary
+pointer) may not work under pure Wayland because `xdotool` depends on XTest.
+Run under X11 or XWayland.
 
 ### Portability
 
 `setup.sh` auto-installs deps only on pacman-based distros (Arch, Garuda,
 Manjaro). On apt/dnf distros it prints a reminder — install the equivalents
 manually.
+
+## Residual risks
+
+- Isolation is a Bubblewrap sandbox, not a VM. Paths that are not in the
+  mount table are not protected by it. A kernel that blocks user namespaces,
+  or a plugin that talks to something outside the sandbox, can still escape
+  what the launcher enforces.
+- Plugin/DAW installer URLs in Ansible are version-pinned only; vendors
+  published no digests (Phase 5).
+- Packer templates still contain a build-time password hash / SSH password
+  so the image can be provisioned; the last provisioner locks those
+  accounts before the published disk is written.
+- No Python lockfiles and no Docker image digest.
+- This parent repository is local orchestration (`setup.sh`, `daw-env.sh`).
+  `yabridge-test-infra` is the publishable harness / web / Packer repo.
+  Upstream `robbert-vdh/yabridge` is never modified here
+  (`build/yabridge-src` is an untracked clone).
+
+## Checks
+
+`./scripts/check.sh` runs shellcheck on the parent scripts, the bats suite,
+and the web and harness pytest suites when those venvs exist.
 
 ## Related
 

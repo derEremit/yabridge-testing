@@ -513,7 +513,7 @@ cat > "$ENV_FILE" << ENVEOF
 # after sourcing this directly — use the wrappers instead:
 #
 #   ./test.sh info              # collect env info (test harness only)
-#   ./test.sh validate          # run mouse tests
+#   ./test.sh probe             # run mouse tests
 #   ./daw-env.sh reaper         # launch DAW against a COW clone of your prefix
 #   ./daw-env.sh bitwig-studio
 #
@@ -566,7 +566,7 @@ echo "  Prefix:   \$WINEPREFIX"
 echo ""
 echo "Commands available:"
 echo "  yabridge-test info     — collect system info"
-echo "  yabridge-test validate  — run mouse coordinate tests"
+echo "  yabridge-test probe     — run mouse coordinate tests"
 echo "  yabridge-wine winecfg  — configure wine prefix"
 echo "  yabridge-wine --version"
 ENVEOF
@@ -633,12 +633,12 @@ echo -e "${GREEN}========================================${NC}"
 echo ""
 echo "  Run the test harness (isolated wine + yabridge):"
 echo "    ./test.sh info"
-echo "    ./test.sh validate"
+echo "    ./test.sh probe"
 echo ""
 echo "  Run a DAW with wine 11.8 + yabridge master:"
 echo "    ./daw-env.sh reaper"
 echo "    ./daw-env.sh bitwig-studio"
-echo "    (clones your real prefix copy-on-write — originals never touched)"
+echo "    (clones your real prefix copy-on-write; the sandbox mounts production paths read-only)"
 echo ""
 echo "  Manage the isolated test prefix:"
 echo "    source env.sh && yabridge-wine winecfg"
