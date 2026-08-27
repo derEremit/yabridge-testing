@@ -79,6 +79,13 @@ fi
 if [[ "${DAW_TEST_CP_FAIL:-false}" == true ]]; then
   exit 1
 fi
+if [[ "${DAW_TEST_CP_FAIL_REFLINK:-false}" == true ]]; then
+  for arg in "$@"; do
+    if [[ "$arg" == --reflink=always ]]; then
+      exit 1
+    fi
+  done
+fi
 EOF
   chmod +x "$FIXTURE_ROOT/daw-env.sh" "$FIXTURE_BIN/fake-daw" \
     "$FIXTURE_BIN/wine" "$FIXTURE_BIN/wineserver" "$FIXTURE_BIN/cp"
@@ -312,11 +319,31 @@ write_provenance() {
 
   [ "$status" -ne 0 ]
   [[ "$output" == *"reflink clone failed"* ]]
+  [[ "$output" == *"--copy"* ]]
   [ -f "$SOURCE/source-sentinel" ]
   [ ! -e "$FIXTURE_ROOT/prefix-copy" ]
   shopt -s nullglob
   local candidates=("$FIXTURE_ROOT"/prefix-copy.new.*)
   [ "${#candidates[@]}" -eq 0 ]
+}
+
+@test "explicit copy fallback warns with the source size in GB" {
+  export DAW_TEST_CP_FAIL_REFLINK=true
+  dd if=/dev/zero of="$SOURCE/payload.bin" bs=1024 count=1024 status=none
+
+  run_daw_fixture --copy --prefix "$SOURCE" fake-daw
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"maybe-huge"* ]]
+  [[ "$output" == *" GB"* ]]
+  [[ "$output" =~ about\ [0-9]+\.[0-9]+\ GB ]]
+  [ -f "$FIXTURE_ROOT/prefix-copy/payload.bin" ]
+  [ "$(cat "$DAW_PREFIX")" = "$FIXTURE_ROOT/prefix-copy" ]
+  local copy_argv
+  copy_argv="$(cat "$CALLS")"
+  [[ "$copy_argv" == *$'\n'* ]]
+  [[ "$copy_argv" == *" --reflink=always "* ]]
+  [[ "$copy_argv" == *" --reflink=never "* ]]
 }
 
 @test "source replacement during copying refuses activation" {

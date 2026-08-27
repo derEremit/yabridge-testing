@@ -168,6 +168,7 @@ refuses to start your DAW rather than running it unsandboxed.
 ./daw-env.sh reaper /path/to/project.rpp
 ./daw-env.sh --fresh reaper            # re-clone the prefix first
 ./daw-env.sh --prefix ~/.wine reaper   # clone a different real prefix
+./daw-env.sh --copy reaper             # if reflink fails, full-copy (maybe huge)
 ./daw-env.sh --clean                   # delete prefix-copy/ and exit
 
 # Make one project directory writable inside the sandbox (repeatable)
@@ -425,8 +426,9 @@ noise from a step you did not ask about.
   build's** `libyabridge` *and* host — so this exercises yabridge master in
   full, plugin side and host side.
 - Requires the project dir and the real prefix on the same btrfs/XFS
-  filesystem. If reflink isn't available the script aborts loudly rather
-  than doing a full multi-GB copy.
+  filesystem for a reflink clone. Without that, the script aborts rather
+  than doing a full multi-GB copy. Pass `--copy` to opt in: it warns with
+  the estimated size in GB, then copies.
 
 ### Advanced: manual env (use with care)
 

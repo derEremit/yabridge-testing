@@ -183,10 +183,34 @@ require_atomic_exchange() {
     fi
 }
 
+prefix_copy_size_gb() {
+    local source="$1"
+    local bytes
+
+    bytes="$(du -sb -- "$source" 2>/dev/null | awk '{ print $1 }')"
+    if [[ ! "$bytes" =~ ^[0-9]+$ ]]; then
+        echo "0.0"
+        return 1
+    fi
+    awk -v bytes="$bytes" 'BEGIN { printf "%.1f", bytes / (1024 * 1024 * 1024) }'
+}
+
+warn_full_prefix_copy() {
+    local source="$1"
+    local size_gb
+
+    size_gb="$(prefix_copy_size_gb "$source")" || size_gb="0.0"
+    echo "" >&2
+    echo "Warning: reflink is not available on this filesystem." >&2
+    echo "--copy will create a maybe-huge full copy of about ${size_gb} GB." >&2
+    echo "The original prefix is only read. This can take a long time and use that much extra disk." >&2
+}
+
 clone_prefix_atomic() {
     local source="$1"
     local clone="$2"
     local replace_existing="$3"
+    local allow_full_copy="${4:-false}"
     local candidate="$clone.new.$$"
     local expected_source_identity
 
@@ -208,13 +232,26 @@ clone_prefix_atomic() {
     echo "Cloning $source -> $clone"
     echo "  reflink copy-on-write — instant, near-zero disk, original only READ..."
     if ! cp -a --reflink=always "$source" "$candidate"; then
-        echo "" >&2
-        clone_state_error "reflink clone failed. This needs the project dir and the"
-        echo "real prefix on the SAME btrfs/XFS filesystem. Aborting WITHOUT" >&2
-        echo "falling back to a plain copy — your original is untouched." >&2
         cleanup_owned_clone_candidate
-        trap - EXIT INT TERM
-        return 1
+        if [[ "$allow_full_copy" == true ]]; then
+            warn_full_prefix_copy "$source"
+            OWNED_CLONE_CANDIDATE="$candidate"
+            if ! cp -a --reflink=never "$source" "$candidate"; then
+                echo "" >&2
+                clone_state_error "full prefix copy failed. The original is untouched."
+                cleanup_owned_clone_candidate
+                trap - EXIT INT TERM
+                return 1
+            fi
+        else
+            echo "" >&2
+            clone_state_error "reflink clone failed. This needs the project dir and the"
+            echo "real prefix on the SAME btrfs/XFS filesystem. Aborting WITHOUT" >&2
+            echo "falling back to a plain copy — your original is untouched." >&2
+            echo "Pass --copy to opt in to a maybe-huge full copy." >&2
+            trap - EXIT INT TERM
+            return 1
+        fi
     fi
     if [[ ! -d "$candidate" || -L "$candidate" ]]; then
         clone_state_error "reflink clone did not produce a safe directory"

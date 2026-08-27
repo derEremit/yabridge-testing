@@ -131,6 +131,19 @@ EOF
   [ ! -e "$FIXTURE_ROOT/build/wine" ]
 }
 
+# Kron4ek ships wineboot as a relative symlink to wine. That is a valid
+# candidate; only the wine loader itself must be a regular file.
+@test "setup accepts a Kron4ek-style wineboot symlink" {
+  seed_malicious_archive wineboot-symlink "wine"
+
+  run_setup_fixture --wine-version 11.8 --wine-sha256 "$WINE_SHA" --no-yabridge
+
+  [ "$status" -eq 0 ]
+  [ -x "$FIXTURE_ROOT/build/wine/bin/wine" ]
+  [ -L "$FIXTURE_ROOT/build/wine/bin/wineboot" ]
+  [ "$(readlink -- "$FIXTURE_ROOT/build/wine/bin/wineboot")" = "wine" ]
+}
+
 @test "TERM before exchange cleans the candidate and preserves active Wine" {
   seed_working_wine
   FAKE_INTERRUPT_PHASE=before-exchange

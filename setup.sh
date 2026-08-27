@@ -373,11 +373,18 @@ PY
         WINE_CANDIDATE_VALID=true
         EXTRACTED_CANONICAL="$(realpath -e -- "$EXTRACTED_DIR")" ||
             WINE_CANDIDATE_VALID=false
+        # wine and wineserver must be regular executables. wineboot is a
+        # relative symlink to wine in Kron4ek (and Wine) trees, including
+        # 11.8 and 11.16; it still has to resolve to a regular file inside
+        # the extracted candidate.
         for WINE_COMMAND in wine wineboot wineserver; do
             WINE_EXECUTABLE="$EXTRACTED_DIR/bin/$WINE_COMMAND"
             if [[ ! -f "$WINE_EXECUTABLE" ||
-                -L "$WINE_EXECUTABLE" ||
                 ! -x "$WINE_EXECUTABLE" ]]; then
+                WINE_CANDIDATE_VALID=false
+                continue
+            fi
+            if [[ "$WINE_COMMAND" != wineboot && -L "$WINE_EXECUTABLE" ]]; then
                 WINE_CANDIDATE_VALID=false
                 continue
             fi

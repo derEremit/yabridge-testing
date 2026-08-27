@@ -75,7 +75,7 @@ while [[ $# -gt 0 ]]; do
 done
 wine="$build/wine-11.8-staging-amd64"
 mkdir -p "$wine/bin"
-for command in wine wineboot wineserver; do
+for command in wine wineserver; do
   if [[ "$command" == wine && "$FAKE_CANDIDATE_INVALID" == true ]]; then
     printf '#!/bin/bash\nexit 1\n' > "$wine/bin/$command"
   else
@@ -83,6 +83,8 @@ for command in wine wineboot wineserver; do
   fi
   chmod +x "$wine/bin/$command"
 done
+# Kron4ek ships wineboot as a relative symlink to wine.
+ln -s wine "$wine/bin/wineboot"
 EOF
 
   cat > "$FAKE_BIN/git" <<'EOF'

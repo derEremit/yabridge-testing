@@ -42,7 +42,7 @@
 # and plugin state survives). Use --fresh to re-clone, --clean to delete it.
 #
 # Requirements:
-#   - /home on btrfs (or any FS with reflink). Verified: yes.
+#   - /home on btrfs (or any FS with reflink), or --copy for a full copy.
 #   - ./setup.sh run at least once (builds yabridge, downloads wine 11.8).
 #   - DAW installed natively (not flatpak/snap).
 #   - bubblewrap 0.11+ and a kernel that permits its namespaces.
@@ -54,6 +54,7 @@
 #   ./daw-env.sh --fresh reaper            # re-clone the prefix first
 #   ./daw-env.sh --refresh-bridges reaper  # refresh bridges, reuse the clone
 #   ./daw-env.sh --prefix ~/.wine reaper   # clone a different real prefix
+#   ./daw-env.sh --copy reaper             # if reflink fails, full-copy (maybe huge)
 #   ./daw-env.sh --clean                   # delete prefix-copy/ + isolation/
 #
 # Plugin path options:
@@ -69,6 +70,12 @@
 #                              system root, such as /usr/lib/vst3, is fine.
 #   --allow-empty              launch even when no bridges were generated.
 #                              Fixtures and diagnostics only.
+#
+# Clone options:
+#   --copy                     if reflink is unavailable, make a full copy
+#                              of the source prefix. Prints the estimated
+#                              size in GB first. Off by default: without
+#                              this flag a missing reflink aborts.
 #
 # Sandbox options:
 #   --writable-path DIR        make one existing, canonical, absolute directory
@@ -97,6 +104,7 @@ FRESH=false
 CLEAN=false
 REFRESH_BRIDGES=false
 ALLOW_EMPTY=false
+ALLOW_FULL_COPY=false
 NATIVE_PLUGIN_PATHS=()
 REQUESTED_WRITABLE_PATHS=()
 LAUNCH_COMMAND=()
@@ -206,6 +214,7 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --allow-empty) ALLOW_EMPTY=true; shift ;;
+        --copy) ALLOW_FULL_COPY=true; shift ;;
         --native-plugin-path)
             require_option_value "--native-plugin-path" "${2:-}"
             validate_native_plugin_path "$2" || exit 2
@@ -234,7 +243,7 @@ done
 
 DAW="${1:-}"
 if [[ "$CLEAN" != true && -z "$DAW" ]]; then
-    echo "Usage: $0 [--fresh] [--refresh-bridges] [--allow-empty] [--network]"
+    echo "Usage: $0 [--fresh] [--refresh-bridges] [--allow-empty] [--copy] [--network]"
     echo "          [--quiet-wine] [--native-plugin-path DIR]..."
     echo "          [--writable-path DIR]... [--prefix DIR] <daw-binary> [args...]"
     echo "       $0 --clean"
@@ -336,7 +345,7 @@ if [[ "$clone_exists" == true && "$FRESH" != true ]]; then
     echo "Reusing existing clone: $COPY (created $(date -r "$COPY" '+%Y-%m-%d %H:%M'))"
     echo "  (use --fresh to re-clone from $REAL_PREFIX)"
 else
-    clone_prefix_atomic "$REAL_PREFIX" "$COPY" "$clone_exists"
+    clone_prefix_atomic "$REAL_PREFIX" "$COPY" "$clone_exists" "$ALLOW_FULL_COPY"
 fi
 
 # ── Build the environment ────────────────────────────────────────────────────

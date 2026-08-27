@@ -83,10 +83,11 @@ while [[ $# -gt 0 ]]; do
 done
 wine="$destination/wine-11.8-staging-amd64"
 mkdir -p "$wine/bin"
-for command in wine wineboot wineserver; do
+for command in wine wineserver; do
   printf '#!/bin/bash\nexit 0\n' > "$wine/bin/$command"
   chmod +x "$wine/bin/$command"
 done
+ln -s wine "$wine/bin/wineboot"
 EOF
 
   cat > "$FAKE_BIN/python3" <<'EOF'
@@ -179,6 +180,11 @@ with tarfile.open(archive, "w") as output:
             output.addfile(member)
         elif command == "wine" and kind == "hardlink":
             member.type = tarfile.LNKTYPE
+            member.linkname = target
+            member.mode = 0o755
+            output.addfile(member)
+        elif command == "wineboot" and kind == "wineboot-symlink":
+            member.type = tarfile.SYMTYPE
             member.linkname = target
             member.mode = 0o755
             output.addfile(member)

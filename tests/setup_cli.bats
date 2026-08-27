@@ -58,3 +58,9 @@ load test_helper
   run_daw_env --help
   [ "$status" -eq 0 ]
 }
+
+@test "DAW launcher help names the explicit full-copy fallback" {
+  run_daw_env --help
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"--copy"* ]]
+}
