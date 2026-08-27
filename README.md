@@ -48,14 +48,23 @@ isolation. No system files are touched — everything lives in `build/`,
 │   └── home/         # generated bridges, on VST_PATH/VST3_PATH/CLAP_PATH
 ├── run-state/        # created by daw-env.sh, never writable inside the sandbox
 │   └── run-manifest.json  # what the last launch actually was
-└── yabridge-test-infra/
-    ├── test-harness/  # Python test harness CLI
-    └── web/           # results server (ops: web/README.md)
+├── test-harness/     # Python test harness CLI
+├── probe/            # coordinate probe fixtures
+├── packer/           # VM image templates
+├── ansible/          # provisioning
+├── install.sh        # bootstrap clone/tarball
+├── docs/
+└── tests/
 ```
 
 ## Setup
 
 ### First time
+
+```bash
+git clone https://github.com/derEremit/yabridge-staging
+cd yabridge-staging
+```
 
 Installing Wine means running bytes fetched over the network, so `setup.sh`
 will not install Wine until you have told it *which* release you want and what
