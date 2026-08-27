@@ -35,3 +35,12 @@ probe/build*/
 probe/subprojects/clap/
 probe/subprojects/packagecache/
 probe/subprojects/.wraplock
+
+# Packer
+packer/output-*/
+*.box
+packer_cache/
+
+# Ansible
+ansible/.ansible_cache/
+*.retry

@@ -1,0 +1,137 @@
+---
+# Yabridge role - build and configure yabridge
+
+- name: Set yabridge facts
+  ansible.builtin.set_fact:
+    yabridge_repo: "{{ yabridge_repo | default('https://github.com/robbert-vdh/yabridge.git') }}"
+    yabridge_branch: "{{ yabridge_branch | default('new-wine10-embedding') }}"
+    yabridge_build_dir: "{{ yabridge_build_dir | default('/tmp/yabridge-build') }}"
+    yabridge_install_dir: "{{ yabridge_install_dir | default('/opt/yabridge') }}"
+
+- name: Install build dependencies (Debian/Ubuntu)
+  ansible.builtin.apt:
+    name:
+      - build-essential
+      - cmake
+      - git
+      - pkg-config
+      - libxcb1-dev
+      - libxcb-icccm4-dev
+      - gcc-mingw-w64-x86-64
+      - g++-mingw-w64-x86-64
+      - libdbus-1-dev
+      - libgl1-mesa-dev
+      - meson
+      - ninja-build
+    state: present
+  become: true
+  when: ansible_os_family == "Debian"
+
+- name: Install build dependencies (Arch)
+  community.general.pacman:
+    name:
+      - base-devel
+      - cmake
+      - git
+      - pkgconf
+      - libxcb
+      - xcb-util-wm
+      - mingw-w64-gcc
+      - dbus
+      - mesa
+      - meson
+      - ninja
+    state: present
+  become: true
+  when: ansible_os_family == "Archlinux"
+
+- name: Remove existing build directory
+  ansible.builtin.file:
+    path: "{{ yabridge_build_dir }}"
+    state: absent
+
+- name: Clone yabridge repository
+  ansible.builtin.git:
+    repo: "{{ yabridge_repo }}"
+    dest: "{{ yabridge_build_dir }}"
+    version: "{{ yabridge_branch }}"
+    force: true
+    recursive: true
+
+- name: Get yabridge commit hash
+  ansible.builtin.command:
+    cmd: git rev-parse HEAD
+    chdir: "{{ yabridge_build_dir }}"
+  register: yabridge_commit
+  changed_when: false
+
+- name: Get yabridge commit message
+  ansible.builtin.command:
+    cmd: git log -1 --pretty=%s
+    chdir: "{{ yabridge_build_dir }}"
+  register: yabridge_commit_msg
+  changed_when: false
+
+- name: Configure yabridge with meson
+  ansible.builtin.command:
+    cmd: >
+      meson setup build
+      --buildtype=release
+      --prefix={{ yabridge_install_dir }}
+      -Dbitbridge=true
+    chdir: "{{ yabridge_build_dir }}"
+  changed_when: true
+
+- name: Build yabridge
+  ansible.builtin.command:
+    cmd: meson compile -C build
+    chdir: "{{ yabridge_build_dir }}"
+  changed_when: true
+
+- name: Install yabridge
+  ansible.builtin.command:
+    cmd: meson install -C build
+    chdir: "{{ yabridge_build_dir }}"
+  become: true
+  changed_when: true
+
+- name: Create symlink for yabridgectl
+  ansible.builtin.file:
+    src: "{{ yabridge_install_dir }}/bin/yabridgectl"
+    dest: "/usr/local/bin/yabridgectl"
+    state: link
+  become: true
+  ignore_errors: true
+
+- name: Configure yabridgectl plugin path
+  ansible.builtin.command:
+    cmd: "{{ yabridge_install_dir }}/bin/yabridgectl set --path {{ yabridge_install_dir }}/lib"
+  changed_when: true
+
+- name: Save build info
+  ansible.builtin.copy:
+    dest: "{{ yabridge_install_dir }}/BUILD_INFO"
+    content: |
+      Repository: {{ yabridge_repo }}
+      Branch: {{ yabridge_branch }}
+      Commit: {{ yabridge_commit.stdout }}
+      Message: {{ yabridge_commit_msg.stdout }}
+      Built: {{ ansible_date_time.iso8601 }}
+      Host: {{ inventory_hostname }}
+    mode: '0644'
+  become: true
+
+- name: Clean up build directory
+  ansible.builtin.file:
+    path: "{{ yabridge_build_dir }}"
+    state: absent
+  when: yabridge_cleanup_build | default(true)
+
+- name: Display build results
+  ansible.builtin.debug:
+    msg: |
+      Yabridge built successfully!
+      Branch: {{ yabridge_branch }}
+      Commit: {{ yabridge_commit.stdout }}
+      Message: {{ yabridge_commit_msg.stdout }}
+      Install path: {{ yabridge_install_dir }}

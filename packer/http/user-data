@@ -1,0 +1,26 @@
+#cloud-config
+autoinstall:
+  version: 1
+  locale: en_US.UTF-8
+  keyboard:
+    layout: us
+  identity:
+    hostname: yabridge-test
+    username: yabridge
+    password: "$6$rounds=4096$xyz$hashed_password_placeholder"
+  ssh:
+    install-server: true
+    allow-pw: true
+  storage:
+    layout:
+      name: direct
+  packages:
+    - openssh-server
+    - curl
+    - wget
+    - git
+    - build-essential
+    - linux-headers-generic
+  late-commands:
+    - echo 'yabridge ALL=(ALL) NOPASSWD:ALL' > /target/etc/sudoers.d/yabridge
+    - chmod 440 /target/etc/sudoers.d/yabridge

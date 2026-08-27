@@ -1,0 +1,145 @@
+---
+# Test plugins role - install free VST plugins for testing
+
+- name: Set plugin variables
+  ansible.builtin.set_fact:
+    plugin_dir: "{{ plugin_install_dir | default('/opt/test-plugins') }}"
+    downloads_dir: "{{ plugin_install_dir | default('/opt/test-plugins') }}/downloads"
+    wine_vst_dir: "{{ ansible_env.HOME }}/.wine/drive_c/Program Files/VstPlugins"
+    wine_vst3_dir: "{{ ansible_env.HOME }}/.wine/drive_c/Program Files/Common Files/VST3"
+
+- name: Create plugin directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: '0755'
+  loop:
+    - "{{ plugin_dir }}"
+    - "{{ downloads_dir }}"
+  become: true
+
+- name: Create Wine VST directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: '0755'
+  loop:
+    - "{{ wine_vst_dir }}"
+    - "{{ wine_vst3_dir }}"
+
+# Vital synth
+- name: Check if Vital is installed
+  ansible.builtin.stat:
+    path: "{{ wine_vst3_dir }}/Vital.vst3"
+  register: vital_installed
+
+- name: Download Vital installer
+  ansible.builtin.get_url:
+    url: "https://github.com/mtytel/vital/releases/download/v1.5.5/VitalInstaller.exe"
+    dest: "{{ downloads_dir }}/VitalInstaller.exe"
+    mode: '0644'
+  when: not vital_installed.stat.exists
+  become: true
+
+- name: Install Vital
+  ansible.builtin.command:
+    cmd: wine "{{ downloads_dir }}/VitalInstaller.exe" /S
+  environment:
+    WINEPREFIX: "{{ ansible_env.HOME }}/.wine"
+    WINEDEBUG: "-all"
+  when: not vital_installed.stat.exists
+  changed_when: true
+  ignore_errors: true
+
+# Dexed (portable - no installer)
+- name: Check if Dexed is installed
+  ansible.builtin.stat:
+    path: "{{ plugin_dir }}/Dexed"
+  register: dexed_installed
+
+- name: Download Dexed
+  ansible.builtin.get_url:
+    url: "https://github.com/asb2m10/dexed/releases/download/v0.9.7/dexed-0.9.7-windows.zip"
+    dest: "{{ downloads_dir }}/dexed.zip"
+    mode: '0644'
+  when: not dexed_installed.stat.exists
+  become: true
+
+- name: Create Dexed directory
+  ansible.builtin.file:
+    path: "{{ plugin_dir }}/Dexed"
+    state: directory
+    mode: '0755'
+  when: not dexed_installed.stat.exists
+  become: true
+
+- name: Extract Dexed
+  ansible.builtin.unarchive:
+    src: "{{ downloads_dir }}/dexed.zip"
+    dest: "{{ plugin_dir }}/Dexed"
+    remote_src: true
+  when: not dexed_installed.stat.exists
+  become: true
+
+# OB-Xd (portable - no installer)
+- name: Check if OB-Xd is installed
+  ansible.builtin.stat:
+    path: "{{ plugin_dir }}/OB-Xd"
+  register: obxd_installed
+
+- name: Download OB-Xd
+  ansible.builtin.get_url:
+    url: "https://github.com/reales/OB-Xd/releases/download/v2.10/OB-Xd_2_10_Windows_64bit.zip"
+    dest: "{{ downloads_dir }}/OB-Xd.zip"
+    mode: '0644'
+  when: not obxd_installed.stat.exists
+  become: true
+
+- name: Create OB-Xd directory
+  ansible.builtin.file:
+    path: "{{ plugin_dir }}/OB-Xd"
+    state: directory
+    mode: '0755'
+  when: not obxd_installed.stat.exists
+  become: true
+
+- name: Extract OB-Xd
+  ansible.builtin.unarchive:
+    src: "{{ downloads_dir }}/OB-Xd.zip"
+    dest: "{{ plugin_dir }}/OB-Xd"
+    remote_src: true
+  when: not obxd_installed.stat.exists
+  become: true
+
+# Configure yabridge for all plugins
+- name: Add plugin directories to yabridgectl
+  ansible.builtin.command:
+    cmd: "yabridgectl add '{{ item }}'"
+  loop:
+    - "{{ wine_vst_dir }}"
+    - "{{ wine_vst3_dir }}"
+    - "{{ plugin_dir }}"
+  ignore_errors: true
+  changed_when: true
+
+- name: Sync yabridge
+  ansible.builtin.command:
+    cmd: yabridgectl sync
+  changed_when: true
+
+- name: Get yabridge status
+  ansible.builtin.command:
+    cmd: yabridgectl status
+  register: yabridge_status
+  changed_when: false
+
+- name: Display installed plugins
+  ansible.builtin.debug:
+    msg: |
+      Test plugins installed:
+      - Vital: {{ vital_installed.stat.exists or 'installed' }}
+      - Dexed: {{ dexed_installed.stat.exists or 'installed' }}
+      - OB-Xd: {{ obxd_installed.stat.exists or 'installed' }}
+
+      Yabridge status:
+      {{ yabridge_status.stdout }}

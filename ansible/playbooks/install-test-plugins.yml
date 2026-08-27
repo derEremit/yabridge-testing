@@ -1,0 +1,120 @@
+---
+# Install free VST plugins for testing
+- name: Install test plugins
+  hosts: all
+  become: false
+
+  vars:
+    plugin_install_dir: "{{ plugin_install_dir | default('/opt/test-plugins') }}"
+    vst_dir: "{{ ansible_env.HOME }}/.vst"
+    vst3_dir: "{{ ansible_env.HOME }}/.vst3"
+
+  tasks:
+    - name: Create plugin directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: '0755'
+      loop:
+        - "{{ plugin_install_dir }}"
+        - "{{ plugin_install_dir }}/downloads"
+        - "{{ vst_dir }}"
+        - "{{ vst3_dir }}"
+
+    # Vital Synth (free version)
+    - name: Download Vital
+      ansible.builtin.get_url:
+        url: "https://github.com/mtytel/vital/releases/download/v1.5.5/VitalInstaller.exe"
+        dest: "{{ plugin_install_dir }}/downloads/VitalInstaller.exe"
+        mode: '0644'
+      register: vital_download
+
+    - name: Install Vital via Wine
+      ansible.builtin.command:
+        cmd: wine "{{ plugin_install_dir }}/downloads/VitalInstaller.exe" /S
+      environment:
+        WINEPREFIX: "{{ ansible_env.HOME }}/.wine"
+      when: vital_download.changed
+      changed_when: true
+
+    # TDR Nova (free EQ)
+    - name: Download TDR Nova
+      ansible.builtin.get_url:
+        url: "https://www.tokyodawn.net/labs/Nova/1.2.1/TDR%20Nova%20(installer).zip"
+        dest: "{{ plugin_install_dir }}/downloads/TDR_Nova.zip"
+        mode: '0644'
+      register: tdr_nova_download
+
+    - name: Extract TDR Nova
+      ansible.builtin.unarchive:
+        src: "{{ plugin_install_dir }}/downloads/TDR_Nova.zip"
+        dest: "{{ plugin_install_dir }}/downloads/"
+        remote_src: true
+      when: tdr_nova_download.changed
+
+    - name: Install TDR Nova via Wine
+      ansible.builtin.command:
+        cmd: wine "{{ plugin_install_dir }}/downloads/TDR Nova (installer).exe" /S
+      environment:
+        WINEPREFIX: "{{ ansible_env.HOME }}/.wine"
+      when: tdr_nova_download.changed
+      changed_when: true
+      ignore_errors: true
+
+    # Dexed (DX7 emulator)
+    - name: Download Dexed
+      ansible.builtin.get_url:
+        url: "https://github.com/asb2m10/dexed/releases/download/v0.9.7/dexed-0.9.7-windows.zip"
+        dest: "{{ plugin_install_dir }}/downloads/dexed.zip"
+        mode: '0644'
+      register: dexed_download
+
+    - name: Extract Dexed
+      ansible.builtin.unarchive:
+        src: "{{ plugin_install_dir }}/downloads/dexed.zip"
+        dest: "{{ plugin_install_dir }}/dexed/"
+        remote_src: true
+        creates: "{{ plugin_install_dir }}/dexed"
+      when: dexed_download.changed
+
+    # OB-Xd (Oberheim emulator)
+    - name: Download OB-Xd
+      ansible.builtin.get_url:
+        url: "https://github.com/reales/OB-Xd/releases/download/v2.10/OB-Xd_2_10_Windows_64bit.zip"
+        dest: "{{ plugin_install_dir }}/downloads/OB-Xd.zip"
+        mode: '0644'
+      register: obxd_download
+
+    - name: Extract OB-Xd
+      ansible.builtin.unarchive:
+        src: "{{ plugin_install_dir }}/downloads/OB-Xd.zip"
+        dest: "{{ plugin_install_dir }}/OB-Xd/"
+        remote_src: true
+        creates: "{{ plugin_install_dir }}/OB-Xd"
+      when: obxd_download.changed
+
+    # Update yabridge for all plugins
+    - name: Add plugin paths to yabridgectl
+      ansible.builtin.command:
+        cmd: "yabridgectl add '{{ item }}'"
+      loop:
+        - "{{ ansible_env.HOME }}/.wine/drive_c/Program Files/Common Files/VST3"
+        - "{{ ansible_env.HOME }}/.wine/drive_c/Program Files/VstPlugins"
+        - "{{ plugin_install_dir }}"
+      ignore_errors: true
+      changed_when: true
+
+    - name: Sync yabridge plugins
+      ansible.builtin.command:
+        cmd: yabridgectl sync
+      changed_when: true
+
+    - name: List installed plugins
+      ansible.builtin.command:
+        cmd: yabridgectl status
+      register: yabridge_status
+      changed_when: false
+
+    - name: Display plugin status
+      ansible.builtin.debug:
+        msg: "{{ yabridge_status.stdout }}"

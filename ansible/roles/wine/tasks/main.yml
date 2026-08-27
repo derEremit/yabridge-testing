@@ -1,0 +1,73 @@
+---
+# Wine role - manages Wine installation and version switching
+
+- name: Include distro-specific variables
+  ansible.builtin.include_vars:
+    file: "{{ ansible_os_family | lower }}.yml"
+  ignore_errors: true
+
+- name: Check current Wine version
+  ansible.builtin.command: wine --version
+  register: current_wine_version
+  changed_when: false
+  failed_when: false
+
+- name: Display current Wine version
+  ansible.builtin.debug:
+    msg: "Current Wine version: {{ current_wine_version.stdout | default('Not installed') }}"
+
+# Version-specific installation
+- name: Install Wine from package manager
+  ansible.builtin.include_tasks: "install-{{ ansible_os_family | lower }}.yml"
+  when: not wine_build_from_source | default(false)
+
+- name: Build Wine from source
+  ansible.builtin.include_tasks: build-source.yml
+  when: wine_build_from_source | default(false)
+
+# Wine configuration
+- name: Create Wine prefix directory
+  ansible.builtin.file:
+    path: "{{ wine_prefix }}"
+    state: directory
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: '0755'
+
+- name: Initialize Wine prefix
+  ansible.builtin.command:
+    cmd: wineboot --init
+  environment:
+    WINEPREFIX: "{{ wine_prefix }}"
+    WINEARCH: "{{ wine_arch }}"
+  become: false
+  changed_when: true
+  when: wine_initialize_prefix | default(true)
+
+# Apply patches if specified
+- name: Apply Wine patches
+  ansible.builtin.include_tasks: apply-patches.yml
+  when: wine_patches | length > 0
+  loop: "{{ wine_patches }}"
+  loop_control:
+    loop_var: patch_name
+
+# Install common dependencies
+- name: Install Wine dependencies via winetricks
+  ansible.builtin.command:
+    cmd: "winetricks -q {{ item }}"
+  environment:
+    WINEPREFIX: "{{ wine_prefix }}"
+  loop: "{{ wine_winetricks_packages }}"
+  become: false
+  changed_when: true
+  when: wine_install_dependencies | default(true)
+
+- name: Verify Wine installation
+  ansible.builtin.command: wine --version
+  register: final_wine_version
+  changed_when: false
+
+- name: Display final Wine version
+  ansible.builtin.debug:
+    msg: "Wine {{ final_wine_version.stdout }} installed successfully"

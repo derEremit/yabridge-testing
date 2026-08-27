@@ -1,0 +1,32 @@
+---
+# Wine role default variables
+
+# Wine version and variant
+wine_version: "10.13"
+wine_staging: false
+wine_build_from_source: false
+
+# Wine prefix configuration
+wine_prefix: "{{ ansible_env.HOME }}/.wine"
+wine_arch: "win64"
+
+# Patches to apply (e.g., ["MR8669", "stian-fix"])
+wine_patches: []
+
+# Common dependencies to install via winetricks
+wine_winetricks_packages:
+  - corefonts
+  - vcrun2019
+
+# Control flags
+wine_initialize_prefix: true
+wine_install_dependencies: true
+
+# Build from source settings
+wine_source_url: "https://github.com/wine-mirror/wine.git"
+wine_build_dir: "/tmp/wine-build"
+wine_install_prefix: "/opt/wine-custom"
+
+# Patch URLs (update as needed)
+wine_patch_urls:
+  MR8669: "https://gitlab.winehq.org/wine/wine/-/merge_requests/8669.patch"

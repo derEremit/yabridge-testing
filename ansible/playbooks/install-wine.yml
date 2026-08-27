@@ -1,0 +1,146 @@
+---
+# Install and configure Wine for yabridge testing
+- name: Install Wine
+  hosts: all
+  become: true
+
+  vars:
+    wine_version: "{{ wine_version | default('10.13') }}"
+    wine_staging: "{{ wine_staging | default(false) }}"
+    wine_patches: "{{ wine_patches | default([]) }}"
+
+  tasks:
+    # Ubuntu/Debian Wine installation
+    - name: Add WineHQ repository key (Debian/Ubuntu)
+      ansible.builtin.apt_key:
+        url: https://dl.winehq.org/wine-builds/winehq.key
+        state: present
+      when: ansible_os_family == "Debian"
+
+    - name: Add WineHQ repository (Ubuntu)
+      ansible.builtin.apt_repository:
+        repo: "deb https://dl.winehq.org/wine-builds/ubuntu/ {{ ansible_distribution_release }} main"
+        state: present
+        filename: winehq
+      when: ansible_distribution == "Ubuntu"
+
+    - name: Enable i386 architecture (Debian/Ubuntu)
+      ansible.builtin.command: dpkg --add-architecture i386
+      changed_when: false
+      when: ansible_os_family == "Debian"
+
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: true
+      when: ansible_os_family == "Debian"
+
+    - name: Install Wine stable (Debian/Ubuntu)
+      ansible.builtin.apt:
+        name: winehq-stable
+        state: present
+        install_recommends: true
+      when:
+        - ansible_os_family == "Debian"
+        - not wine_staging
+
+    - name: Install Wine staging (Debian/Ubuntu)
+      ansible.builtin.apt:
+        name: winehq-staging
+        state: present
+        install_recommends: true
+      when:
+        - ansible_os_family == "Debian"
+        - wine_staging
+
+    # Arch Linux Wine installation
+    - name: Enable multilib repository (Arch)
+      ansible.builtin.blockinfile:
+        path: /etc/pacman.conf
+        block: |
+          [multilib]
+          Include = /etc/pacman.d/mirrorlist
+        marker: "# {mark} ANSIBLE MANAGED BLOCK - multilib"
+      when: ansible_os_family == "Archlinux"
+      register: multilib_enabled
+
+    - name: Update pacman cache after enabling multilib
+      community.general.pacman:
+        update_cache: true
+      when:
+        - ansible_os_family == "Archlinux"
+        - multilib_enabled.changed
+
+    - name: Install Wine (Arch)
+      community.general.pacman:
+        name:
+          - wine
+          - wine-mono
+          - wine-gecko
+          - winetricks
+          - lib32-gnutls
+          - lib32-sdl2
+          - lib32-libpulse
+          - lib32-alsa-plugins
+        state: present
+      when:
+        - ansible_os_family == "Archlinux"
+        - not wine_staging
+
+    - name: Install Wine staging (Arch)
+      community.general.pacman:
+        name:
+          - wine-staging
+          - wine-mono
+          - wine-gecko
+          - winetricks
+          - lib32-gnutls
+          - lib32-sdl2
+          - lib32-libpulse
+          - lib32-alsa-plugins
+        state: present
+      when:
+        - ansible_os_family == "Archlinux"
+        - wine_staging
+
+    # Common tasks
+    - name: Install winetricks
+      ansible.builtin.package:
+        name: winetricks
+        state: present
+
+    - name: Create Wine prefix directory
+      ansible.builtin.file:
+        path: "/home/{{ ansible_user }}/.wine"
+        state: directory
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: '0755'
+
+    - name: Initialize Wine prefix
+      ansible.builtin.command:
+        cmd: wineboot --init
+      environment:
+        WINEPREFIX: "/home/{{ ansible_user }}/.wine"
+        WINEARCH: win64
+      become: false
+      changed_when: true
+
+    - name: Install Wine dependencies via winetricks
+      ansible.builtin.command:
+        cmd: "winetricks -q {{ item }}"
+      environment:
+        WINEPREFIX: "/home/{{ ansible_user }}/.wine"
+      loop:
+        - corefonts
+        - vcrun2019
+      become: false
+      changed_when: true
+
+    - name: Get Wine version
+      ansible.builtin.command: wine --version
+      register: wine_version_output
+      changed_when: false
+
+    - name: Display Wine version
+      ansible.builtin.debug:
+        msg: "Installed Wine version: {{ wine_version_output.stdout }}"

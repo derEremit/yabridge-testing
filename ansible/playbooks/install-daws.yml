@@ -1,0 +1,122 @@
+---
+# Install DAWs for yabridge testing
+- name: Install DAWs
+  hosts: all
+  become: true
+
+  vars:
+    install_ardour: true
+    install_carla: true
+    install_reaper: false  # Requires manual download
+    install_bitwig: false  # Requires license
+
+  tasks:
+    # Ardour installation
+    - name: Install Ardour (Debian/Ubuntu)
+      ansible.builtin.apt:
+        name: ardour
+        state: present
+      when:
+        - ansible_os_family == "Debian"
+        - install_ardour
+
+    - name: Install Ardour (Arch)
+      community.general.pacman:
+        name: ardour
+        state: present
+      when:
+        - ansible_os_family == "Archlinux"
+        - install_ardour
+
+    # Carla installation
+    - name: Install Carla (Debian/Ubuntu)
+      ansible.builtin.apt:
+        name: carla
+        state: present
+      when:
+        - ansible_os_family == "Debian"
+        - install_carla
+
+    - name: Install Carla (Arch)
+      community.general.pacman:
+        name: carla
+        state: present
+      when:
+        - ansible_os_family == "Archlinux"
+        - install_carla
+
+    # Flatpak-based installations
+    - name: Ensure Flatpak is installed
+      ansible.builtin.package:
+        name: flatpak
+        state: present
+
+    - name: Add Flathub repository
+      community.general.flatpak_remote:
+        name: flathub
+        flatpakrepo_url: https://dl.flathub.org/repo/flathub.flatpakrepo
+        state: present
+
+    - name: Install Ardour via Flatpak (alternative)
+      community.general.flatpak:
+        name: org.ardour.Ardour
+        state: present
+      when: install_ardour
+
+    - name: Install Carla via Flatpak (alternative)
+      community.general.flatpak:
+        name: studio.kx.carla
+        state: present
+      when: install_carla
+
+    # REAPER trial (manual installation helper)
+    - name: Create REAPER download directory
+      ansible.builtin.file:
+        path: /opt/reaper
+        state: directory
+        mode: '0755'
+      when: install_reaper
+
+    - name: Download REAPER (Linux)
+      ansible.builtin.get_url:
+        url: "https://www.reaper.fm/files/7.x/reaper724_linux_x86_64.tar.xz"
+        dest: /tmp/reaper.tar.xz
+        mode: '0644'
+      when: install_reaper
+
+    - name: Extract REAPER
+      ansible.builtin.unarchive:
+        src: /tmp/reaper.tar.xz
+        dest: /opt/reaper
+        remote_src: true
+        extra_opts: [--strip-components=1]
+      when: install_reaper
+
+    - name: Install REAPER
+      ansible.builtin.command:
+        cmd: ./install-reaper.sh --install /opt/reaper --integrate-desktop
+        chdir: /opt/reaper
+      when: install_reaper
+      changed_when: true
+
+    # Create VST directories and symlinks
+    - name: Create VST directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: '0755'
+      loop:
+        - "/home/{{ ansible_user }}/.vst"
+        - "/home/{{ ansible_user }}/.vst3"
+        - "/home/{{ ansible_user }}/.clap"
+
+    - name: Display installed DAWs
+      ansible.builtin.debug:
+        msg: |
+          DAWs installed:
+          - Ardour: {{ install_ardour }}
+          - Carla: {{ install_carla }}
+          - REAPER: {{ install_reaper }}
+          - Bitwig: {{ install_bitwig }}

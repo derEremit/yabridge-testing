@@ -1,0 +1,113 @@
+name: Build VM Images
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'packer/**'
+      - '.github/workflows/build-images.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'packer/**'
+  workflow_dispatch:
+    inputs:
+      image:
+        description: 'Image to build'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - ubuntu-2404-gnome
+          - arch-kde-plasma
+
+jobs:
+  validate:
+    name: Validate Packer Templates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # tag: v4
+
+      - name: Setup Packer
+        uses: hashicorp/setup-packer@ce93c3c08a6c2ff2275bf4b54ff0d9a75f6c9789 # tag: v3
+        with:
+          version: 1.16.0
+
+      - name: Initialize Packer
+        run: |
+          cd packer
+          packer init ubuntu-2404-gnome.pkr.hcl
+          packer init arch-kde-plasma.pkr.hcl
+
+      - name: Validate Ubuntu template
+        run: |
+          cd packer
+          packer validate ubuntu-2404-gnome.pkr.hcl
+
+      - name: Validate Arch template
+        run: |
+          cd packer
+          packer validate arch-kde-plasma.pkr.hcl
+
+  build-ubuntu:
+    name: Build Ubuntu 24.04 GNOME
+    needs: validate
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && (github.event.inputs.image == 'all' || github.event.inputs.image == 'ubuntu-2404-gnome')
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # tag: v4
+
+      - name: Setup Packer
+        uses: hashicorp/setup-packer@ce93c3c08a6c2ff2275bf4b54ff0d9a75f6c9789 # tag: v3
+        with:
+          version: 1.16.0
+
+      - name: Install QEMU
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86 qemu-utils
+
+      - name: Build Ubuntu Image
+        run: |
+          cd packer
+          packer init ubuntu-2404-gnome.pkr.hcl
+          packer build -var 'headless=true' ubuntu-2404-gnome.pkr.hcl
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # tag: v4
+        with:
+          name: ubuntu-2404-gnome
+          path: packer/output-ubuntu-2404-gnome/
+          retention-days: 7
+
+  build-arch:
+    name: Build Arch Linux KDE Plasma
+    needs: validate
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && (github.event.inputs.image == 'all' || github.event.inputs.image == 'arch-kde-plasma')
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # tag: v4
+
+      - name: Setup Packer
+        uses: hashicorp/setup-packer@ce93c3c08a6c2ff2275bf4b54ff0d9a75f6c9789 # tag: v3
+        with:
+          version: 1.16.0
+
+      - name: Install QEMU
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86 qemu-utils
+
+      - name: Build Arch Image
+        run: |
+          cd packer
+          packer init arch-kde-plasma.pkr.hcl
+          packer build -var 'headless=true' arch-kde-plasma.pkr.hcl
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # tag: v4
+        with:
+          name: arch-kde-plasma
+          path: packer/output-arch-kde-plasma/
+          retention-days: 7

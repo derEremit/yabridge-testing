@@ -1,0 +1,129 @@
+---
+# Base provisioning playbook for yabridge test VMs
+- name: Provision base system
+  hosts: all
+  become: true
+
+  tasks:
+    - name: Update package cache (Debian/Ubuntu)
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+      when: ansible_os_family == "Debian"
+
+    - name: Update package cache (Arch)
+      community.general.pacman:
+        update_cache: true
+      when: ansible_os_family == "Archlinux"
+
+    - name: Install base packages (Debian/Ubuntu)
+      ansible.builtin.apt:
+        name:
+          - build-essential
+          - cmake
+          - git
+          - curl
+          - wget
+          - unzip
+          - pkg-config
+          - python3
+          - python3-pip
+          - python3-venv
+          - htop
+          - tmux
+          - xdotool
+          - wmctrl
+        state: present
+      when: ansible_os_family == "Debian"
+
+    - name: Install base packages (Arch)
+      community.general.pacman:
+        name:
+          - base-devel
+          - cmake
+          - git
+          - curl
+          - wget
+          - unzip
+          - pkgconf
+          - python
+          - python-pip
+          - htop
+          - tmux
+          - xdotool
+          - wmctrl
+        state: present
+      when: ansible_os_family == "Archlinux"
+
+    - name: Install audio development libraries (Debian/Ubuntu)
+      ansible.builtin.apt:
+        name:
+          - libasound2-dev
+          - libjack-jackd2-dev
+          - libpipewire-0.3-dev
+          - libx11-dev
+          - libxcb1-dev
+          - libxcb-util-dev
+          - libxcb-icccm4-dev
+          - libfreetype6-dev
+          - libgl1-mesa-dev
+        state: present
+      when: ansible_os_family == "Debian"
+
+    - name: Install audio development libraries (Arch)
+      community.general.pacman:
+        name:
+          - alsa-lib
+          - jack2
+          - pipewire
+          - pipewire-jack
+          - wireplumber
+          - libx11
+          - libxcb
+          - xcb-util
+          - xcb-util-wm
+          - freetype2
+          - mesa
+        state: present
+      when: ansible_os_family == "Archlinux"
+
+    - name: Create yabridge directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: '0755'
+      loop:
+        - "{{ yabridge_install_dir }}"
+        - "{{ plugin_install_dir }}"
+        - "/home/{{ ansible_user }}/.vst"
+        - "/home/{{ ansible_user }}/.vst3"
+
+    - name: Add user to audio group
+      ansible.builtin.user:
+        name: "{{ ansible_user }}"
+        groups: audio
+        append: true
+
+    - name: Configure PipeWire for low latency
+      ansible.builtin.copy:
+        dest: /etc/pipewire/pipewire.conf.d/yabridge.conf
+        content: |
+          context.properties = {
+              default.clock.rate = 48000
+              default.clock.quantum = 256
+              default.clock.min-quantum = 256
+          }
+        owner: root
+        group: root
+        mode: '0644'
+      notify: Restart PipeWire
+
+  handlers:
+    - name: Restart PipeWire
+      ansible.builtin.systemd:
+        name: pipewire
+        state: restarted
+        scope: user
+      become: false

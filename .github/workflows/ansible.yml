@@ -1,0 +1,35 @@
+name: Ansible syntax
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'ansible/**'
+      - '.github/workflows/ansible.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'ansible/**'
+      - '.github/workflows/ansible.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  syntax:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ansible
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # tag: v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # tag: v5
+        with:
+          python-version: '3.12'
+      - run: pip install ansible-core
+      - run: ansible-galaxy collection install community.general
+      - run: ansible-playbook --syntax-check playbooks/provision-base.yml
+      - run: ansible-playbook --syntax-check playbooks/install-wine.yml
+      - run: ansible-playbook --syntax-check playbooks/build-yabridge.yml
+      - run: ansible-playbook --syntax-check playbooks/install-daws.yml
+      - run: ansible-playbook --syntax-check playbooks/install-test-plugins.yml
