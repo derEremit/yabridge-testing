@@ -1,0 +1,85 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "yabridge-test"
+version = "0.1.0"
+description = "Test harness for yabridge Wine 10 testing infrastructure"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+authors = [
+    {name = "Yabridge Contributors"}
+]
+keywords = ["yabridge", "wine", "vst", "testing", "audio"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Multimedia :: Sound/Audio",
+    "Topic :: Software Development :: Testing",
+]
+
+dependencies = [
+    "click>=8.1.0",
+    "pydantic>=2.0.0",
+    "httpx>=0.25.0",
+    "rich>=13.0.0",
+    "psutil>=5.9.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+    "mypy>=1.5.0",
+    "ruff>=0.1.0",
+    "types-psutil>=5.9.0",
+    "pyyaml>=6.0.0",
+]
+
+[project.scripts]
+yabridge-test = "yabridge_test.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/robbert-vdh/yabridge"
+Repository = "https://github.com/derEremit/yabridge-staging"
+Issues = "https://github.com/robbert-vdh/yabridge/issues/409"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+warn_return_any = true
+warn_unused_ignores = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "C4"]
+
+[tool.black]
+line-length = 100
+target-version = ["py310"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = ["--strict-config", "--strict-markers", "-ra"]
+filterwarnings = ["error"]
+markers = [
+    "native_probe: requires pre-built native or MinGW probe artifacts",
+    "wine_probe: requires Wine runtime, Xvfb, and probe build tools",
+    "live_probe: opt-in live yabridge library integration via YABRIDGE_LIVE_LIB",
+]

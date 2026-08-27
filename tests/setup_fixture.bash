@@ -6,17 +6,17 @@ setup_project_fixture() {
     "$FIXTURE_ROOT/lib" \
     "$FIXTURE_ROOT/build" \
     "$FIXTURE_ROOT/prefix" \
-    "$FIXTURE_ROOT/yabridge-test-infra/test-harness" \
+    "$FIXTURE_ROOT/test-harness" \
     "$FAKE_BIN"
   cp "$PROJECT_ROOT/setup.sh" "$FIXTURE_ROOT/setup.sh"
   cp "$PROJECT_ROOT/lib/component-state.sh" "$FIXTURE_ROOT/lib/component-state.sh"
   cp \
-    "$PROJECT_ROOT/yabridge-test-infra/test-harness/pyproject.toml" \
-    "$PROJECT_ROOT/yabridge-test-infra/test-harness/README.md" \
-    "$FIXTURE_ROOT/yabridge-test-infra/test-harness/"
+    "$PROJECT_ROOT/test-harness/pyproject.toml" \
+    "$PROJECT_ROOT/test-harness/README.md" \
+    "$FIXTURE_ROOT/test-harness/"
   cp -R \
-    "$PROJECT_ROOT/yabridge-test-infra/test-harness/src" \
-    "$FIXTURE_ROOT/yabridge-test-infra/test-harness/src"
+    "$PROJECT_ROOT/test-harness/src" \
+    "$FIXTURE_ROOT/test-harness/src"
   # The call log starts as an existing empty file on purpose: tests that refute
   # a command was ever run are then asking about its contents, not about
   # whether anything created the log at all.

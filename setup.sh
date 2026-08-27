@@ -14,7 +14,7 @@ PREFIX="$ROOT/prefix"
 WINE_DIR="$BUILD/wine"
 YABRIDGE_SRC="$BUILD/yabridge-src"
 YABRIDGE_OUT="$BUILD/yabridge"
-HARNESS="$ROOT/yabridge-test-infra/test-harness"
+HARNESS="$ROOT/test-harness"
 HARNESS_VENV="$HARNESS/.venv"
 ENV_FILE="$ROOT/env.sh"
 STATE_FILE="$BUILD/component-state.env"
@@ -580,7 +580,7 @@ cat > "$ROOT/test.sh" << 'TESTEOF'
 # Run yabridge test harness with isolated wine + yabridge
 set -euo pipefail
 ROOT="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
-HARNESS="$ROOT/yabridge-test-infra/test-harness"
+HARNESS="$ROOT/test-harness"
 
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     cat <<'EOF'

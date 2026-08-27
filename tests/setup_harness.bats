@@ -22,12 +22,12 @@ install_harness_fixture() {
 @test "setup installs the local harness into its venv deterministically" {
   install_harness_fixture
 
-  [ -x "$FIXTURE_ROOT/yabridge-test-infra/test-harness/.venv/bin/yabridge-test" ]
+  [ -x "$FIXTURE_ROOT/test-harness/.venv/bin/yabridge-test" ]
   grep -Fq \
-    "python3 -m venv $FIXTURE_ROOT/yabridge-test-infra/test-harness/.venv" \
+    "python3 -m venv $FIXTURE_ROOT/test-harness/.venv" \
     "$CALLS"
   grep -Fq \
-    "python3 -m pip install --disable-pip-version-check -e $FIXTURE_ROOT/yabridge-test-infra/test-harness" \
+    "python3 -m pip install --disable-pip-version-check -e $FIXTURE_ROOT/test-harness" \
     "$CALLS"
 }
 
@@ -44,7 +44,7 @@ install_harness_fixture() {
 
 @test "test wrapper never falls back to a global command" {
   install_harness_fixture
-  rm -f "$FIXTURE_ROOT/yabridge-test-infra/test-harness/.venv/bin/yabridge-test"
+  rm -f "$FIXTURE_ROOT/test-harness/.venv/bin/yabridge-test"
 
   run env PATH="$FAKE_BIN:$PATH" GLOBAL_HARNESS_USED="$GLOBAL_HARNESS_USED" \
     "$FIXTURE_ROOT/test.sh" info

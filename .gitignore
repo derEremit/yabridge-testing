@@ -28,4 +28,10 @@ AUDIT-LOG.md
 # Python
 __pycache__/
 *.py[cod]
+*.egg-info/
 .venv/
+
+probe/build*/
+probe/subprojects/clap/
+probe/subprojects/packagecache/
+probe/subprojects/.wraplock

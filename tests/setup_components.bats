@@ -15,13 +15,12 @@ setup() {
     "$FIXTURE/lib" \
     "$FIXTURE/build" \
     "$FIXTURE/prefix" \
-    "$FIXTURE/yabridge-test-infra" \
     "$FAKE_BIN"
   cp "$PROJECT_ROOT/setup.sh" "$FIXTURE/setup.sh"
   cp "$PROJECT_ROOT/lib/component-state.sh" "$FIXTURE/lib/component-state.sh"
   cp -R \
-    "$PROJECT_ROOT/yabridge-test-infra/test-harness" \
-    "$FIXTURE/yabridge-test-infra/test-harness"
+    "$PROJECT_ROOT/test-harness" \
+    "$FIXTURE/test-harness"
   touch "$FIXTURE/prefix/system.reg" "$CALLS"
   create_fake_commands
 }
