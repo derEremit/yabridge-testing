@@ -1,6 +1,6 @@
 # Public / Private Repository Split Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. Create the isolated worktree with superpowers:using-git-worktrees at execution time (parent `yabridge-staging`, branch `remediate/repo-split`). If `.worktrees/hygiene` is still registered, remove it first (`git worktree remove --force` is required because that worktree still has submodule metadata; the branch is already in `main`).
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. Create the isolated worktree with superpowers:using-git-worktrees at execution time (parent `yabridge-staging`, branch `remediate/repo-split`). **Before** `git worktree add`, if `.worktrees/hygiene` is still registered, run `git worktree remove --force .worktrees/hygiene` from parent `main` and `git branch -d remediate/hygiene` (already merged). Do not `git submodule deinit` from a worktree — that shared `.git/config` unhooked `main` once already.
 
 **Goal:** One public tree with isolation + harness + VMs; one private tree that is only the website. No submodule.
 
@@ -22,6 +22,9 @@
 - Harness default API URL stays `https://yabridge-tests.fly.dev`.
 - System Python is 3.14. Harness/web suites use their `.venv` when present.
 - After `test.sh` edits, `setup.sh` `TESTEOF` must stay byte-identical (`tests/docs_hygiene.bats` already asserts this).
+- Copy `LICENSE` into both new trees. Merge probe/packer ignore rules into parent `.gitignore` before `git add probe`.
+- Do not `git submodule deinit`. Task 3 is `git rm` the gitlink + delete `.gitmodules`.
+- Private `yabridge-results` pytest must not import sibling `test-harness/` or `../docs/architecture.md`. Do not copy `web/tests/test_harness_contract.py`.
 
 ## File structure
 
@@ -47,6 +50,11 @@
 - Modify: `test.sh`
 - Modify: `scripts/check.sh`
 - Modify: `tests/setup_components.bats`
+- Modify: `tests/setup_fixture.bash`
+- Modify: `tests/setup_harness.bats`
+- Modify: `.gitignore` (add `probe/build*/`, `probe/subprojects/clap/`, `probe/subprojects/packagecache/`)
+- Create: `LICENSE` (copy from submodule)
+- Modify: `test-harness/pyproject.toml` Repository URL after copy
 - Modify: `tests/docs_hygiene.bats` only if the heredoc assertion needs the new body
 
 **Interfaces:**
@@ -54,7 +62,7 @@
 - `test.sh` execs `"$ROOT/test-harness/.venv/bin/yabridge-test"`
 - `check.sh` uses `$ROOT/test-harness/.venv/bin/python`
 - `check.sh` has no `web/` block
-- Fixture copies `$PROJECT_ROOT/test-harness` → `$FIXTURE/test-harness`
+- Fixtures copy `$PROJECT_ROOT/test-harness` → `$FIXTURE/test-harness` and `$FIXTURE_ROOT/test-harness` (no `yabridge-test-infra/` directory name)
 
 Work from `/home/z3n/projects/yabridge-staging/.worktrees/repo-split`.
 
@@ -98,21 +106,43 @@ Expected: `HARNESS` still names `yabridge-test-infra/test-harness`.
 - [ ] **Step 3: Copy trees and retarget paths**
 
 ```bash
-# from the worktree; do not copy venvs or __pycache__
+# from the worktree; do not copy venvs, caches, or probe build trees
 rsync -a --exclude '.venv' --exclude '__pycache__' --exclude '.pytest_cache' \
   yabridge-test-infra/test-harness/ test-harness/
-rsync -a --exclude '.venv' --exclude '__pycache__' \
+rsync -a \
+  --exclude '.venv' --exclude '__pycache__' \
+  --exclude 'build-*' --exclude 'subprojects/clap' \
+  --exclude 'subprojects/packagecache' --exclude 'subprojects/.wraplock' \
   yabridge-test-infra/probe/ probe/
+cp yabridge-test-infra/LICENSE LICENSE
 ```
 
-Then edit `setup.sh`, `test.sh`, `scripts/check.sh`, and `tests/setup_components.bats` (`mkdir -p "$FIXTURE/test-harness"` parent, `cp -R "$PROJECT_ROOT/test-harness" "$FIXTURE/test-harness"`). Delete the web block from `check.sh`. Keep `TESTEOF` identical to `test.sh`.
+Append to parent `.gitignore`:
+
+```
+probe/build*/
+probe/subprojects/clap/
+probe/subprojects/packagecache/
+probe/subprojects/.wraplock
+```
+
+Set `test-harness/pyproject.toml` `[project.urls] Repository` to
+`https://github.com/derEremit/yabridge-staging`.
+
+Then edit `setup.sh`, `test.sh`, `scripts/check.sh`,
+`tests/setup_components.bats`, `tests/setup_fixture.bash`, and
+`tests/setup_harness.bats` so every harness path is
+`$ROOT/test-harness` / `$FIXTURE/test-harness` /
+`$FIXTURE_ROOT/test-harness`. Delete the web block from `check.sh`.
+Keep `TESTEOF` identical to `test.sh`.
 
 Do not delete the submodule yet (Task 3). Do not copy `web/`.
 
 - [ ] **Step 4: Re-run focused bats**
 
 ```bash
-bats tests/repo_split.bats tests/docs_hygiene.bats tests/setup_cli.bats tests/setup_components.bats
+bats tests/repo_split.bats tests/docs_hygiene.bats tests/setup_cli.bats \
+  tests/setup_components.bats tests/setup_harness.bats
 ```
 
 Expected: pass.
@@ -120,7 +150,7 @@ Expected: pass.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add test-harness probe setup.sh test.sh scripts/check.sh tests
+git add test-harness probe LICENSE .gitignore setup.sh test.sh scripts/check.sh tests
 git commit -m "$(cat <<'EOF'
 feat: vendor the harness and probe in the public tree
 
@@ -137,13 +167,16 @@ EOF
 **Files:**
 - Create: `packer/`, `ansible/`, `install.sh` (copy)
 - Create: infra docs that are not operator-only, from `yabridge-test-infra/docs/` (`coord-probe.md`, `getting-started.md`, `test-protocol.md`; `architecture.md` only if you strip website-operator chapters — otherwise skip it and keep parent README)
-- Create: `tests/test_packer_nocloud.py`, `tests/test_ansible_build.py` with `ROOT` still `parents[1]` (they already assume repo root)
+- Create: `tests/test_packer_nocloud.py`, `tests/test_ansible_build.py` with `ROOT` still `parents[1]`
+- Create: `.github/workflows/{test-harness,probe,ansible,build-images}.yml` in **this** task (Task 4 only locks “no web.yml”). `test_ansible_build.py` reads `ansible.yml` at collection time.
 - Modify: `install.sh` `REPO_URL` to `https://github.com/derEremit/yabridge-staging`
-- Modify: tarball fallback in `install.sh` if it still assumes `yabridge-test-infra-main`
+- Modify: tarball fallback `yabridge-test-infra-main` → `yabridge-staging-main`
+- Modify: copied `docs/getting-started.md` — delete the “Running the Results Server” chapter (`cd web`). Drop `contributing.md` links or rewrite and copy that file with the staging clone URL.
 
 **Interfaces:**
 - Packer/Ansible tests resolve `packer/http` and `ansible/playbooks` from the public root
-- `install.sh` clones the public staging URL
+- `install.sh` clones the public staging URL and does not mention `yabridge-test-infra`
+- The four public workflows exist; `web.yml` does not
 - No `web/` in the copy
 
 - [ ] **Step 1: Extend failing URL/layout tests**
@@ -159,8 +192,8 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_install_sh_clones_public_staging() -> None:
     text = (ROOT / "install.sh").read_text()
     assert "https://github.com/derEremit/yabridge-staging" in text
-    assert "robbert-vdh/yabridge-test-infra" not in text
-    assert "derEremit/yabridge-test-infra" not in text
+    assert "yabridge-test-infra" not in text
+    assert "yabridge-staging-main" in text
 ```
 
 - [ ] **Step 2: Run and witness FileNotFoundError / old URL**
@@ -178,9 +211,15 @@ cp yabridge-test-infra/docs/getting-started.md docs/getting-started.md
 cp yabridge-test-infra/docs/test-protocol.md docs/test-protocol.md
 cp yabridge-test-infra/tests/test_packer_nocloud.py tests/test_packer_nocloud.py
 cp yabridge-test-infra/tests/test_ansible_build.py tests/test_ansible_build.py
+mkdir -p .github/workflows
+cp yabridge-test-infra/.github/workflows/test-harness.yml .github/workflows/
+cp yabridge-test-infra/.github/workflows/probe.yml .github/workflows/
+cp yabridge-test-infra/.github/workflows/ansible.yml .github/workflows/
+cp yabridge-test-infra/.github/workflows/build-images.yml .github/workflows/
+# do not copy web.yml
 ```
 
-Edit `install.sh`. Fix any `cd yabridge-test-infra/test-harness` in copied docs to `cd test-harness`. Do not copy `docs/contributing.md` clone lines until you rewrite them, or rewrite in the same edit.
+Edit `install.sh` (`REPO_URL` and tarball dir). Strip the results-server chapter from `docs/getting-started.md`. Do not copy `docs/contributing.md` unless you rewrite its clone URL; remove the Next Steps link to it if you skip the file.
 
 - [ ] **Step 4: Run packer/ansible/clone tests + `bats tests/repo_split.bats`**
 
@@ -194,7 +233,7 @@ Expected: pass (`ansible-playbook` syntax-check may need `ANSIBLE_LOCAL_TEMP` un
 - [ ] **Step 5: Commit**
 
 ```bash
-git add packer ansible install.sh docs tests
+git add packer ansible install.sh docs tests .github
 git commit -m "$(cat <<'EOF'
 feat: land Packer, Ansible, and install.sh in the public tree
 
@@ -221,22 +260,25 @@ EOF
 
 - [ ] **Step 1: The Task 1 bats for no gitlink / no `web/app` should still be RED until this task** (if you left the submodule in place). Re-run `bats tests/repo_split.bats` and witness the gitlink assertion fail if it still does.
 
-- [ ] **Step 2: Deinit and remove**
+- [ ] **Step 2: Remove the gitlink without deinit**
 
-From the worktree:
+From the worktree only:
 
 ```bash
-git submodule deinit -f yabridge-test-infra
 git rm -f yabridge-test-infra
-rm -f .gitmodules
-# if git rm left an empty .gitmodules, git rm .gitmodules
+git rm -f .gitmodules
 ```
 
-Do this only in the worktree. Do not deinit from a checkout that shares config with `main` until you have read `git submodule deinit` effects. Safer: `git rm yabridge-test-infra` and delete `.gitmodules` without deinit if deinit previously unregistered the main checkout.
+Do **not** run `git submodule deinit`. That writes shared `.git/config` and can unregister `main`'s submodule.
 
 - [ ] **Step 3: Confirm `git ls-files` has no `yabridge-test-infra` and no `web/`**
 
-- [ ] **Step 4: Re-run `bats tests/repo_split.bats tests/setup_cli.bats tests/setup_components.bats tests/docs_hygiene.bats`**
+- [ ] **Step 4: Re-run the harness bats, including the omitted files**
+
+```bash
+bats tests/repo_split.bats tests/setup_cli.bats tests/setup_components.bats \
+  tests/setup_harness.bats tests/docs_hygiene.bats
+```
 
 Expected: pass.
 
@@ -255,16 +297,13 @@ EOF
 
 ---
 
-### Task 4: Public GitHub Actions (no website workflow)
+### Task 4: Lock public CI (no website workflow)
 
 **Files:**
-- Create: `.github/workflows/test-harness.yml`
-- Create: `.github/workflows/probe.yml`
-- Create: `.github/workflows/ansible.yml`
-- Create: `.github/workflows/build-images.yml`
-- Do not create `web.yml`
+- Modify: none unless Task 2 missed a workflow
+- Test: `tests/test_public_ci.py`
 
-Copy from the last submodule `main` (`76b95b3`) versions. Fix any `working-directory` that assumed a different root (they already run from repo root / `test-harness` / `ansible` / `packer`). Keep the Task 4/5 SHA pins.
+The four workflows were copied in Task 2 so `test_ansible_build.py` could collect. This task only proves `web.yml` is absent and no workflow text mentions `web/`.
 
 - [ ] **Step 1: Failing workflow test**
 
@@ -290,21 +329,22 @@ def test_public_workflows_exclude_the_website() -> None:
 
 Put this in `tests/test_clone_url.py` or `tests/test_public_ci.py`.
 
-- [ ] **Step 2: Run and witness missing `.github/`**
+- [ ] **Step 2: Run the test**
 
-- [ ] **Step 3: Copy the four workflows**
+If Task 2 copied the four files and omitted `web.yml`, this is GREEN immediately — still commit the lock test. If it fails, add the missing workflow from submodule `76b95b3`; do not add `web.yml`.
 
-- [ ] **Step 4: Re-run the workflow test**
+- [ ] **Step 3: Confirm `web.yml` is absent and no workflow contains `web/`**
+
+- [ ] **Step 4: Re-run `python3 -m pytest -q tests/test_public_ci.py tests/test_ansible_build.py`**
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add .github tests
+git add tests/test_public_ci.py
 git commit -m "$(cat <<'EOF'
-ci: run harness, probe, Ansible, and Packer validate here
+test: lock public CI to the four non-web workflows
 
-Parent is the public test repo. The website workflow stays
-out of this tree.
+The website workflow belongs in yabridge-results, not here.
 EOF
 )"
 ```
@@ -319,8 +359,9 @@ EOF
 - Modify: copied getting-started clone lines if Task 2 left any `yabridge-test-infra` clones
 
 **Interfaces:**
-- Private repo root has `app/`, `requirements.txt`, `fly.toml`, `Dockerfile`, `alembic/`, `tests/`, `.github/workflows/web.yml` (paths fixed so jobs run at repo root)
-- Private `git ls-files` has no `test-harness/`, `packer/`, or `daw-env.sh`
+- Private repo root has `app/`, `requirements.txt`, `fly.toml`, `Dockerfile`, `alembic/`, `tests/`, `LICENSE`, `.github/workflows/web.yml` (jobs at repo root)
+- Private `git ls-files` has no `test-harness/`, `packer/`, `daw-env.sh`, or `tests/test_harness_contract.py`
+- `INSTALL_SCRIPT` in `app/main.py` clones `https://github.com/derEremit/yabridge-staging`
 - Public README clone is `git clone https://github.com/derEremit/yabridge-staging` with no recurse-submodules
 - Public README does not link into a `web/` path
 
@@ -344,12 +385,23 @@ mkdir -p /home/z3n/projects/yabridge-results
 # /home/z3n/projects/yabridge-staging/yabridge-test-infra/web
 # (main checkout, even if the worktree already dropped the gitlink)
 rsync -a --exclude '.venv' --exclude '__pycache__' --exclude 'data' \
+  --exclude 'tests/test_harness_contract.py' \
   /home/z3n/projects/yabridge-staging/yabridge-test-infra/web/ \
   /home/z3n/projects/yabridge-results/
+cp /home/z3n/projects/yabridge-staging/yabridge-test-infra/LICENSE \
+  /home/z3n/projects/yabridge-results/LICENSE
 # copy and fix web.yml into /home/z3n/projects/yabridge-results/.github/workflows/web.yml
 ```
 
-In `yabridge-results/.github/workflows/web.yml`: drop `working-directory: web` and `web/` path filters; use repo root. `cache-dependency-path` becomes `requirements.txt` / `requirements-dev.txt`.
+In `yabridge-results/.github/workflows/web.yml`: drop `working-directory: web` and `web/**` path filters; use repo root. `cache-dependency-path` becomes `requirements.txt` / `requirements-dev.txt`.
+
+In the private tree, retarget tests and the live installer **before** `git add`:
+
+- `tests/test_quality_config.py`: `ROOT = Path(__file__).resolve().parents[1]`; `PYPROJECT = ROOT / "pyproject.toml"`; workflow `paths` without `web/`; drop the `working-directory == "web"` assertion.
+- `tests/test_operations_docs.py`: delete `ARCHITECTURE` / `REPO_ROOT / "docs"` reads; keep `README = WEB_ROOT / "README.md"` with `WEB_ROOT = Path(__file__).resolve().parent.parent` (now the private root).
+- `app/main.py` `INSTALL_SCRIPT`: `REPO_URL="https://github.com/derEremit/yabridge-staging"`; tarball dir `yabridge-staging-main`; `cd "$INSTALL_DIR/repo/test-harness"` stays valid.
+- `templates/base.html`: drop or retarget the Source href away from `github.com/yabridge/yabridge-test-infra`.
+- `fly.toml`: comment names the private results server, not `yabridge-test-infra`.
 
 ```bash
 cd /home/z3n/projects/yabridge-results
@@ -397,6 +449,6 @@ Do not merge, do not add remotes, do not push. The controller uses finishing-a-d
 | Harness/probe at top level; check.sh without web | 1 |
 | Packer/Ansible/install.sh public | 2 |
 | No gitlink, no `web/` in public tree | 3 |
-| Four public workflows, no `web.yml` | 4 |
-| Private `yabridge-results`; README; no push | 5 |
+| Four public workflows copied with Ansible tests; no `web.yml` lock | 2 + 4 |
+| Private `yabridge-results` (CI/tests/INSTALL_SCRIPT retargeted); README; no push | 5 |
 | No filter-repo; no lockfiles | Global constraints |
