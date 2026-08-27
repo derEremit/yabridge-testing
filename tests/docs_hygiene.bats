@@ -33,3 +33,10 @@ load test_helper
   grep -q shellcheck "$PROJECT_ROOT/scripts/check.sh"
   grep -q bats "$PROJECT_ROOT/scripts/check.sh"
 }
+
+@test "setup.sh writes the same test.sh body it ships" {
+  local generated
+  generated="$(awk '/^cat > "\$ROOT\/test.sh" << '\''TESTEOF'\''$/{p=1; next} /^TESTEOF$/{exit} p' \
+    "$PROJECT_ROOT/setup.sh")"
+  [ "$generated" = "$(cat "$PROJECT_ROOT/test.sh")" ]
+}
