@@ -15,3 +15,11 @@ load test_helper
   grep -q './test.sh probe' "$PROJECT_ROOT/setup.sh"
   refute grep -q './test.sh validate' "$PROJECT_ROOT/setup.sh"
 }
+
+@test "daw-env.sh does not claim the original prefix is physically untouched" {
+  refute grep -Eq 'physically never' "$PROJECT_ROOT/daw-env.sh"
+}
+
+@test "setup env comment does not claim the original prefix is only read" {
+  refute grep -q 'only read, never written' "$PROJECT_ROOT/setup.sh"
+}

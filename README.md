@@ -464,8 +464,8 @@ yabridge .so
   → loads from $WINEPREFIX (prefix/ — isolated, no real plugins)
 ```
 
-No system wine binary is involved in either case, and no real Wine prefix
-is ever written to.
+No system wine binary is involved in either case. With `./daw-env.sh`, the
+production prefix is mounted read-only and writes go to the clone.
 
 ## Test harness integration
 

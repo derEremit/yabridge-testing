@@ -518,7 +518,8 @@ cat > "$ENV_FILE" << ENVEOF
 #   ./daw-env.sh bitwig-studio
 #
 # ./daw-env.sh reflink-clones your real Wine prefix into prefix-copy/ and
-# points WINEPREFIX there — your original prefix is only read, never written.
+# points WINEPREFIX there — the launcher mounts your production prefix
+# read-only and writes go to the clone.
 # No file swaps, no backups, no restore. Your VST dirs and yabridge install
 # are never modified either.
 #

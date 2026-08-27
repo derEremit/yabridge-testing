@@ -14,7 +14,8 @@
 #     src/plugin/utils.cpp), so no plugin ever resolves back to a real prefix.
 #   - Wine 11.8 will auto-upgrade the prefix on first run (registry + system
 #     DLLs). That upgrade — and every plugin write — lands on COW extents in
-#     prefix-copy/. The original prefix's blocks are physically never modified.
+#     prefix-copy/. The production prefix is mounted read-only; writes from
+#     the DAW land on the clone.
 #   - Clone creation uses a temporary sibling and atomic rename. Failed copies
 #     remove only that invocation's temporary clone.
 #   - yabridge bridges are generated inside isolation/home, an isolated
