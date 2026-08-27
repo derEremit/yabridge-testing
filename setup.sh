@@ -520,8 +520,8 @@ cat > "$ENV_FILE" << ENVEOF
 # ./daw-env.sh reflink-clones your real Wine prefix into prefix-copy/ and
 # points WINEPREFIX there — the launcher mounts your production prefix
 # read-only and writes go to the clone.
-# No file swaps, no backups, no restore. Your VST dirs and yabridge install
-# are never modified either.
+# No file swaps, no backups, no restore. With ./daw-env.sh, production plugin
+# roots and your yabridge install are mounted read-only.
 #
 # To use the custom wine directly without affecting your DAW:
 #   source env.sh && yabridge-wine --version

@@ -2,7 +2,8 @@
 # daw-env.sh — Launch a DAW with test wine 11.8 + test yabridge against a
 #              copy-on-write CLONE of your real Wine prefix.
 #
-# YOUR ORIGINAL PREFIXES ARE NEVER TOUCHED.
+# Uses a reflink clone of your prefix; production paths are mounted read-only
+# — not a guarantee.
 #
 # How it stays safe:
 #   - Your real prefix (default: ~/.audio-production/winplugins) is reflink-
@@ -11,7 +12,8 @@
 #     READS the original.
 #   - WINEPREFIX is exported pointing at the clone. yabridge's find_wine_prefix()
 #     honours WINEPREFIX as an override for ALL plugins (see
-#     src/plugin/utils.cpp), so no plugin ever resolves back to a real prefix.
+#     src/plugin/utils.cpp), so WINEPREFIX points plugins at the clone;
+#     Bubblewrap enforces read-only mounts on production paths.
 #   - Wine 11.8 will auto-upgrade the prefix on first run (registry + system
 #     DLLs). That upgrade — and every plugin write — lands on COW extents in
 #     prefix-copy/. The production prefix is mounted read-only; writes from

@@ -23,3 +23,7 @@ load test_helper
 @test "setup env comment does not claim the original prefix is only read" {
   refute grep -q 'only read, never written' "$PROJECT_ROOT/setup.sh"
 }
+
+@test "daw-env.sh does not shout that prefixes are never touched" {
+  refute grep -F 'YOUR ORIGINAL PREFIXES ARE NEVER TOUCHED' "$PROJECT_ROOT/daw-env.sh"
+}
