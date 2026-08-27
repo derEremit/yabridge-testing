@@ -1,0 +1,30 @@
+#!/bin/bash
+# Run yabridge test harness with isolated wine + yabridge
+set -euo pipefail
+ROOT="$(cd -P -- "$(dirname -- "$0")" && pwd -P)"
+HARNESS="$ROOT/yabridge-test-infra/test-harness"
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+    cat <<'EOF'
+Usage: ./test.sh <yabridge-test-args>
+
+Runs the staging-installed yabridge-test CLI with env.sh loaded.
+
+  ./test.sh info
+  ./test.sh probe
+  ./test.sh suite
+
+EOF
+    exit 0
+fi
+
+if [[ ! -f "$ROOT/env.sh" ]]; then
+    echo "error: environment is not configured; run ./setup.sh first" >&2
+    exit 1
+fi
+if [[ ! -x "$HARNESS/.venv/bin/yabridge-test" ]]; then
+    echo "error: test harness is not installed; run ./setup.sh first" >&2
+    exit 1
+fi
+source "$ROOT/env.sh"
+exec "$HARNESS/.venv/bin/yabridge-test" "$@"

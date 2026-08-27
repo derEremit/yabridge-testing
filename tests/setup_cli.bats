@@ -42,3 +42,19 @@ load test_helper
   [ "$status" -eq 2 ]
   [[ "$output" == *"--prefix requires a value"* ]]
 }
+
+@test "test.sh help exits successfully without env.sh" {
+  run "$PROJECT_ROOT/test.sh" --help
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"probe"* ]]
+}
+
+@test "test.sh -h exits successfully without env.sh" {
+  run "$PROJECT_ROOT/test.sh" -h
+  [ "$status" -eq 0 ]
+}
+
+@test "DAW launcher help exits successfully" {
+  run_daw_env --help
+  [ "$status" -eq 0 ]
+}
