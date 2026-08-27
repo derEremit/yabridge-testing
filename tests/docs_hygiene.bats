@@ -27,3 +27,9 @@ load test_helper
 @test "daw-env.sh does not shout that prefixes are never touched" {
   refute grep -F 'YOUR ORIGINAL PREFIXES ARE NEVER TOUCHED' "$PROJECT_ROOT/daw-env.sh"
 }
+
+@test "check.sh is executable and lists shellcheck and bats" {
+  [ -x "$PROJECT_ROOT/scripts/check.sh" ]
+  grep -q shellcheck "$PROJECT_ROOT/scripts/check.sh"
+  grep -q bats "$PROJECT_ROOT/scripts/check.sh"
+}

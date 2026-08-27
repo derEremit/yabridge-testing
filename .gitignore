@@ -15,7 +15,6 @@ run-state/
 
 # Generated environment (absolute paths)
 env.sh
-test.sh
 
 # Local editor and project metadata
 .claude/
