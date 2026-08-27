@@ -28,7 +28,6 @@ WORKFLOWS = REPO_ROOT / ".github" / "workflows"
 DOC_FILES = (
     COORD_PROBE,
     DOCS / "test-protocol.md",
-    DOCS / "architecture.md",
     TEST_HARNESS_README,
 )
 
