@@ -77,6 +77,19 @@ printf '%s\n' "$*" >> "$YABRIDGECTL_CALLS"
   printf 'XDG_CONFIG_HOME=%s\n' "${XDG_CONFIG_HOME-<unset>}"
   printf 'XDG_DATA_HOME=%s\n' "${XDG_DATA_HOME-<unset>}"
 } >> "$YABRIDGECTL_ENV"
+if [[ "${1:-}" == set ]]; then
+  # Packaged yabridgectl 5.1.1 (and the current master clap `path_auto`
+  # definition without SetTrue/SetFalse) panics on any `set` invocation.
+  echo "fake yabridgectl: set panicked on path_auto" >&2
+  exit 101
+fi
+if [[ "${1:-}" == add ]]; then
+  # Each walk root is logged on its own line so a path that merely prefixes
+  # another (the clone root vs drive_c/Program Files) cannot hide as a match.
+  for add_root in "${@:2}"; do
+    printf 'add-root=%s\n' "$add_root" >> "$YABRIDGECTL_CALLS"
+  done
+fi
 if [[ "${1:-}" == sync ]]; then
   if [[ "${YABRIDGECTL_FAIL_SYNC:-false}" == true ]]; then
     echo "fake yabridgectl: sync failed" >&2
@@ -156,6 +169,32 @@ prepare_clone_fixture() {
   make_prefix "$COPY"
 }
 
+# A Wine-shaped clone: plugin trees live under drive_c, and dosdevices/z: plus
+# the user Documents folder point outside the clone the way a real prefix does.
+prepare_wine_clone_fixture() {
+  local z_target="${1:-$PRODUCTION_HOME}"
+
+  make_prefix "$COPY"
+  mkdir -p "$COPY/drive_c/Program Files/VstPlugins" \
+    "$COPY/drive_c/Program Files/Common Files/VST3" \
+    "$COPY/drive_c/Program Files/Common Files/CLAP" \
+    "$COPY/drive_c/Program Files (x86)/VstPlugins" \
+    "$COPY/drive_c/users/wineuser" \
+    "$COPY/dosdevices" \
+    "$PRODUCTION_HOME/Documents"
+  printf '%s\n' 'plugin' \
+    > "$COPY/drive_c/Program Files/VstPlugins/Good.dll"
+  printf '%s\n' 'plugin' \
+    > "$COPY/drive_c/Program Files/Common Files/CLAP/Good.clap"
+  mkdir -p "$COPY/drive_c/Program Files/Common Files/VST3/Good.vst3"
+  printf '%s\n' 'plugin' \
+    > "$COPY/drive_c/Program Files/Common Files/VST3/Good.vst3/module"
+  ln -s ../drive_c "$COPY/dosdevices/c:"
+  ln -s "$z_target" "$COPY/dosdevices/z:"
+  ln -s "$PRODUCTION_HOME/Documents" \
+    "$COPY/drive_c/users/wineuser/Documents"
+}
+
 run_prepare() {
   run prepare_isolated_bridges \
     "$FIXTURE_ROOT" "$COPY" "$FAKE_YABRIDGECTL" "$YABRIDGE_HOME"
@@ -194,7 +233,87 @@ sync_call_count() {
   grep -Fxq "XDG_DATA_HOME=$logged_home/.local/share" "$ENV_LOG"
 }
 
-@test "bridge sync receives only the clone as a plugin directory" {
+@test "bridge sync receives only in-clone Windows plugin directories" {
+  load_isolated_bridges
+  prepare_wine_clone_fixture
+  good_sync_hook
+
+  run_prepare
+
+  [ "$status" -eq 0 ]
+  local copy_real
+  copy_real="$(realpath -e -- "$COPY")"
+  grep -Fxq "yabridge_home = '$(realpath -e -- "$YABRIDGE_HOME")'" \
+    "$ISOLATED_HOME/.config/yabridgectl/config.toml"
+  grep -Fxq "add-root=$copy_real/drive_c/Program Files" "$CALLS"
+  grep -Fxq "add-root=$copy_real/drive_c/Program Files (x86)" "$CALLS"
+  grep -Fxq "sync --force --prune" "$CALLS"
+  [ "$(grep -c '^add ' "$CALLS")" -eq 1 ]
+  refute grep -Fxq "add-root=$copy_real" "$CALLS"
+  refute grep -Fxq "add $copy_real" "$CALLS"
+  refute grep -Fq "$SOURCE" "$CALLS"
+}
+
+# Wine prefixes expose the host filesystem through dosdevices/z: (often / or
+# $HOME) and through user-folder redirects such as Documents. Those paths must
+# never become yabridgectl walk roots; adding the clone root would follow them.
+@test "bridge generation does not add dosdevices or escaping host symlinks" {
+  load_isolated_bridges
+  prepare_wine_clone_fixture /
+  good_sync_hook
+
+  run_prepare
+
+  [ "$status" -eq 0 ]
+  local copy_real
+  copy_real="$(realpath -e -- "$COPY")"
+  grep -Fxq "add-root=$copy_real/drive_c/Program Files" "$CALLS"
+  grep -Fxq "add-root=$copy_real/drive_c/Program Files (x86)" "$CALLS"
+  refute grep -Fxq "add-root=$copy_real" "$CALLS"
+  refute grep -Fxq "add-root=$copy_real/drive_c" "$CALLS"
+  refute grep -Fxq "add-root=$copy_real/dosdevices" "$CALLS"
+  refute grep -Fxq "add-root=$copy_real/dosdevices/z:" "$CALLS"
+  refute grep -Fxq "add-root=/" "$CALLS"
+  refute grep -Fxq "add-root=$PRODUCTION_HOME" "$CALLS"
+  refute grep -Fq "dosdevices" "$CALLS"
+  refute grep -F "add-root=$copy_real/drive_c/users" "$CALLS"
+}
+
+@test "bridge generation does not fall back to the clone root without plugin dirs" {
+  load_isolated_bridges
+  prepare_clone_fixture
+  mkdir -p "$COPY/drive_c/users/wineuser" "$COPY/dosdevices"
+  ln -s / "$COPY/dosdevices/z:"
+  good_sync_hook
+
+  run_prepare
+
+  [ "$status" -eq 0 ]
+  local copy_real
+  copy_real="$(realpath -e -- "$COPY")"
+  refute grep -E '^add-root=' "$CALLS"
+  refute grep -Fxq "add $copy_real" "$CALLS"
+  refute grep -Fxq "add-root=$copy_real/drive_c" "$CALLS"
+}
+
+@test "bridge generation refuses a Program Files symlink that escapes the clone" {
+  load_isolated_bridges
+  prepare_clone_fixture
+  mkdir -p "$COPY/drive_c"
+  ln -s "$PRODUCTION_HOME" "$COPY/drive_c/Program Files"
+  good_sync_hook
+
+  run_prepare
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"escapes the clone Windows tree"* ]]
+  [ ! -e "$ISOLATION" ]
+  refute compgen -G "$FIXTURE_ROOT/isolation.new.*"
+}
+
+# Packaged yabridgectl 5.1.1 panics on `set` because clap `path_auto` is not a
+# SetTrue/SetFalse flag. Isolated generation must never call that command.
+@test "bridge generation never calls yabridgectl set" {
   load_isolated_bridges
   prepare_clone_fixture
   good_sync_hook
@@ -202,11 +321,11 @@ sync_call_count() {
   run_prepare
 
   [ "$status" -eq 0 ]
-  grep -Fxq "set --path=$(realpath -e -- "$YABRIDGE_HOME")" "$CALLS"
-  grep -Fxq "add $(realpath -e -- "$COPY")" "$CALLS"
-  grep -Fxq "sync --force --prune" "$CALLS"
-  [ "$(grep -c '^add ' "$CALLS")" -eq 1 ]
-  refute grep -Fq "$SOURCE" "$CALLS"
+  [ -L "$ISOLATED_HOME/.vst/yabridge/Good.dll" ]
+  grep -Fxq "yabridge_home = '$(realpath -e -- "$YABRIDGE_HOME")'" \
+    "$ISOLATED_HOME/.config/yabridgectl/config.toml"
+  [ ! -e "$PRODUCTION_HOME/.config/yabridgectl/config.toml" ]
+  refute grep -E '^set( |$)' "$CALLS"
 }
 
 @test "bridge generation accepts generated targets inside the clone" {

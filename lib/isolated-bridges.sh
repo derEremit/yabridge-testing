@@ -15,6 +15,17 @@ ISOLATED_BRIDGES_REFRESH="${ISOLATED_BRIDGES_REFRESH:-false}"
 ISOLATED_BRIDGES_ALLOW_EMPTY="${ISOLATED_BRIDGES_ALLOW_EMPTY:-false}"
 ISOLATED_BRIDGES_EMPTY_REPORTED=false
 ISOLATED_BRIDGE_RELATIVE_ROOTS=(".vst/yabridge" ".vst3/yabridge" ".clap/yabridge")
+# Walk roots for isolated `yabridgectl add`, relative to the clone's drive_c.
+# The clone root itself is never eligible: it contains dosdevices/, and Wine's
+# z: commonly points at / or $HOME. drive_c as a whole is also ineligible
+# because users/*/Documents (and Desktop, Downloads, ...) redirect into $HOME.
+ISOLATED_PLUGIN_ADD_RELATIVE_ROOTS=(
+    "Program Files"
+    "Program Files (x86)"
+    "VstPlugins"
+    "Steinberg/VstPlugins"
+)
+ISOLATED_PLUGIN_ADD_ROOTS=()
 ISOLATED_BRIDGE_SCAN_TEMPLATE_NAME="yabridge-bridge-scan.XXXXXX"
 ISOLATED_BRIDGE_SCAN_ENTRIES=()
 ISOLATED_BRIDGE_HOME=""
@@ -346,6 +357,29 @@ isolated_bridge_active_identity_matches() {
         "$(isolated_bridge_path_identity "$active")" == "$ISOLATED_BRIDGE_ACTIVE_IDENTITY" ]]
 }
 
+# Packaged yabridgectl 5.1.1 panics on any `set` invocation: clap `path_auto`
+# is not a SetTrue/SetFalse flag. Point the isolated tool at the built
+# yabridge home by writing its config ourselves instead.
+write_isolated_yabridgectl_config() {
+    local home="$1"
+    local yabridge_canonical="$2"
+    local config_dir="$home/.config/yabridgectl"
+    local config="$config_dir/config.toml"
+
+    if [[ "$yabridge_canonical" == *$'\''* ]]; then
+        isolated_bridges_error "yabridge home must not contain a single quote: $yabridge_canonical"
+        return 1
+    fi
+    if ! mkdir -p -- "$config_dir"; then
+        isolated_bridges_error "could not create isolated yabridgectl config directory: $config_dir"
+        return 1
+    fi
+    if ! printf "yabridge_home = '%s'\n" "$yabridge_canonical" > "$config"; then
+        isolated_bridges_error "could not write isolated yabridgectl config: $config"
+        return 1
+    fi
+}
+
 # Every yabridgectl call is confined to the candidate HOME/XDG tree, so it can
 # neither read nor write production yabridgectl configuration.
 #
@@ -364,6 +398,49 @@ run_isolated_yabridgectl() {
         XDG_DATA_HOME="$home/.local/share" \
         XDG_CACHE_HOME="$home/.cache" \
         "$yabridgectl" "$@"
+}
+
+# Collect yabridgectl walk roots that stay inside the clone's Windows tree.
+# Existing candidates that resolve outside drive_c fail closed; missing
+# candidates are skipped so a prefix without Program Files still syncs.
+collect_isolated_plugin_add_roots() {
+    local copy_canonical="$1"
+    local drive_c="$copy_canonical/drive_c"
+    local relative candidate resolved existing
+
+    ISOLATED_PLUGIN_ADD_ROOTS=()
+
+    if [[ -L "$drive_c" ]]; then
+        isolated_bridges_error "clone Windows tree is a symlink: $drive_c"
+        return 1
+    fi
+    if [[ ! -d "$drive_c" ]]; then
+        return 0
+    fi
+
+    for relative in "${ISOLATED_PLUGIN_ADD_RELATIVE_ROOTS[@]}"; do
+        candidate="$drive_c/$relative"
+        isolated_bridges_path_exists "$candidate" || continue
+        if ! resolved="$(realpath -e -- "$candidate" 2>/dev/null)"; then
+            isolated_bridges_error "plugin add root does not resolve: $candidate"
+            return 1
+        fi
+        if [[ ! -d "$resolved" ]]; then
+            isolated_bridges_error "plugin add root is not a directory: $candidate"
+            return 1
+        fi
+        if [[ "$resolved" != "$drive_c/"* ]]; then
+            isolated_bridges_error \
+                "plugin add root escapes the clone Windows tree: $candidate -> $resolved"
+            return 1
+        fi
+        for existing in ${ISOLATED_PLUGIN_ADD_ROOTS[@]+"${ISOLATED_PLUGIN_ADD_ROOTS[@]}"}; do
+            if [[ "$resolved" == "$existing" ]]; then
+                continue 2
+            fi
+        done
+        ISOLATED_PLUGIN_ADD_ROOTS+=("$resolved")
+    done
 }
 
 generate_isolated_bridges() {
@@ -405,15 +482,20 @@ generate_isolated_bridges() {
     done
 
     echo "Generating isolated yabridge bridges for $copy_canonical..."
-    if ! run_isolated_yabridgectl "$candidate_home" "$yabridgectl" \
-        set --path="$yabridge_canonical"; then
+    if ! write_isolated_yabridgectl_config "$candidate_home" "$yabridge_canonical"; then
         isolated_bridges_error "could not point the isolated yabridgectl at $yabridge_canonical"
         cleanup_owned_bridge_candidate
         return 1
     fi
-    if ! run_isolated_yabridgectl "$candidate_home" "$yabridgectl" \
-        add "$copy_canonical"; then
-        isolated_bridges_error "could not add the plugin clone to the isolated yabridgectl"
+    if ! collect_isolated_plugin_add_roots "$copy_canonical"; then
+        isolated_bridges_error "could not determine isolated plugin directories in $copy_canonical"
+        cleanup_owned_bridge_candidate
+        return 1
+    fi
+    if [[ "${#ISOLATED_PLUGIN_ADD_ROOTS[@]}" -gt 0 ]] &&
+        ! run_isolated_yabridgectl "$candidate_home" "$yabridgectl" \
+            add "${ISOLATED_PLUGIN_ADD_ROOTS[@]}"; then
+        isolated_bridges_error "could not add isolated plugin directories to yabridgectl"
         cleanup_owned_bridge_candidate
         return 1
     fi
