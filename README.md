@@ -20,7 +20,7 @@ isolation. No system files are touched — everything lives in `build/`,
 | yabridge | [git master](https://github.com/robbert-vdh/yabridge) | `build/yabridge/` |
 | wine-staging | [Kron4ek prebuilt](https://github.com/Kron4ek/Wine-Builds) | `build/wine/` |
 | WINEPREFIX | isolated | `prefix/` |
-| test harness | `yabridge-test-infra/` | venv, not system |
+| test harness | `test-harness/` | venv, not system |
 
 ## Directory Layout
 
@@ -101,7 +101,7 @@ Setup will:
    and only then atomically activate it at `build/wine/`
 3. Clone yabridge git master → `build/yabridge-src/`
 4. Build with meson/ninja → `build/yabridge/`
-5. Create `yabridge-test-infra/test-harness/.venv` and install the local
+5. Create `test-harness/.venv` and install the local
    harness package
 6. Generate `env.sh` and `test.sh`
 7. Initialize an isolated WINEPREFIX at `prefix/`
@@ -129,7 +129,7 @@ compared again.
 
 ### Safe: test harness only (no DAW)
 
-Runs the `yabridge-test` CLI from `yabridge-test-infra/test-harness/` using the
+Runs the `yabridge-test` CLI from `test-harness/` using the
 isolated wine + yabridge. Your system yabridge is never touched.
 
 ```bash
@@ -150,7 +150,7 @@ produce `FAIL`; all unsuccessful or empty executions exit nonzero.
 Build the pinned native and MinGW probe artifacts before running `probe` or
 `validate`. Exact dependencies, build commands, scenario semantics, raw
 measurements, and troubleshooting are documented in
-[the coordinate probe guide](./yabridge-test-infra/docs/coord-probe.md).
+[the coordinate probe guide](./docs/coord-probe.md).
 
 ### Launch a DAW against a COW clone of your real prefix
 
@@ -559,7 +559,7 @@ cannot silence your DAW — but regenerate it anyway if you source it by hand.
 ### `test.sh`
 
 Wrapper around the exact
-`yabridge-test-infra/test-harness/.venv/bin/yabridge-test` installed by
+`test-harness/.venv/bin/yabridge-test` installed by
 `setup.sh`. It checks that `env.sh` and the venv entrypoint exist, sources the
 isolated environment, and passes all arguments through. It never falls back to
 a globally installed command.
@@ -715,23 +715,20 @@ manually.
   so the image can be provisioned; the last provisioner locks those
   accounts before the published disk is written.
 - No Python lockfiles and no Docker image digest.
-- This parent repository is local orchestration (`setup.sh`, `daw-env.sh`).
-  `yabridge-test-infra` is the publishable harness / web / Packer repo.
+- This repository is the public test tree: isolation, harness, probe,
+  Packer, and Ansible. The results server source is private. Submit
+  results to the live site at https://yabridge-tests.fly.dev.
   Upstream `robbert-vdh/yabridge` is never modified here
   (`build/yabridge-src` is an untracked clone).
 
 ## Checks
 
 `./scripts/check.sh` runs shellcheck on the parent scripts, the bats suite,
-and the web and harness pytest suites when those venvs exist.
+and the harness pytest suite when that venv exists.
 
 ## Related
 
 - [yabridge](https://github.com/robbert-vdh/yabridge) — the plugin bridge
-- [yabridge-test-infra](./yabridge-test-infra/) — VM-based testing (Packer,
-  Ansible, results server)
-- [Results server operations](./yabridge-test-infra/web/README.md) — Fly.io +
-  SQLite security, quotas, and operator settings
 - [Kron4ek Wine-Builds](https://github.com/Kron4ek/Wine-Builds) — prebuilt wine
   binaries
 - [Issue #409](https://github.com/robbert-vdh/yabridge/issues/409) — Wine 10
