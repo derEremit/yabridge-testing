@@ -35,6 +35,8 @@ jobs:
             g++-mingw-w64-x86-64 \
             libx11-dev \
             libxtst-dev \
+            libxext-dev \
+            libjson-c-dev \
             xvfb \
             xdotool
 
