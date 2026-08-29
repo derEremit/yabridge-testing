@@ -13,6 +13,7 @@ BUILD="$ROOT/build"
 PREFIX="$ROOT/prefix"
 WINE_DIR="$BUILD/wine"
 YABRIDGE_SRC="$BUILD/yabridge-src"
+YABRIDGE_REPO_DEFAULT="https://github.com/robbert-vdh/yabridge.git"
 YABRIDGE_OUT="$BUILD/yabridge"
 HARNESS="$ROOT/test-harness"
 HARNESS_VENV="$HARNESS/.venv"
@@ -95,10 +96,14 @@ WINE_VERSION_PATTERN='^[A-Za-z0-9][A-Za-z0-9._+-]*$'
 
 usage() {
     local status="${1:-1}"
-    echo "Usage: $0 --wine-version VERSION --wine-sha256 SHA256 [--yabridge-branch BRANCH] [--no-wine] [--no-yabridge]"
+    echo "Usage: $0 --wine-version VERSION --wine-sha256 SHA256 [--yabridge-branch BRANCH] [--yabridge-repo URL] [--yabridge-patch FILE]... [--no-wine] [--no-yabridge]"
     echo "  --wine-version       Wine version to download; required unless --no-wine"
     echo "  --wine-sha256        Expected SHA-256 of the Wine archive; required unless --no-wine"
     echo "  --yabridge-branch    Yabridge git branch/ref (default: master)"
+    echo "  --yabridge-repo      Git repository to build from (default: $YABRIDGE_REPO_DEFAULT);"
+    echo "                       an https://, ssh://, git@ URL or a local directory, e.g. a fork"
+    echo "  --yabridge-patch     Patch file applied after checkout (git apply); repeatable, in order."
+    echo "                       Only each patch's SHA-256 is recorded, never its path"
     echo "  --no-wine            Skip wine setup (use system wine)"
     echo "  --no-yabridge        Skip yabridge build"
     echo ""
@@ -121,6 +126,8 @@ WINE_VERSION=""
 WINE_SHA256=""
 WINE_VERSION_EXPLICIT=false
 YABRIDGE_BRANCH="master"
+YABRIDGE_REPO="$YABRIDGE_REPO_DEFAULT"
+YABRIDGE_PATCHES=()
 SKIP_WINE=false
 SKIP_YABRIDGE=false
 
@@ -142,12 +149,44 @@ while [[ $# -gt 0 ]]; do
             YABRIDGE_BRANCH="$2"
             shift 2
             ;;
+        --yabridge-repo)
+            require_option_value "--yabridge-repo" "${2:-}"
+            YABRIDGE_REPO="$2"
+            shift 2
+            ;;
+        --yabridge-patch)
+            require_option_value "--yabridge-patch" "${2:-}"
+            YABRIDGE_PATCHES+=("$2")
+            shift 2
+            ;;
         --no-wine)         SKIP_WINE=true; shift ;;
         --no-yabridge)     SKIP_YABRIDGE=true; shift ;;
         -h|--help)         usage 0 ;;
         *)                 err "Unknown option: $1"; usage ;;
     esac
 done
+
+# The repository is handed to git verbatim, so it is held to a shape git will
+# read as a remote and never as an option: a URL with a scheme git speaks, the
+# scp-like git@ form, or a directory that already exists.
+if [[ -d "$YABRIDGE_REPO" ]]; then
+    YABRIDGE_REPO="$(realpath -- "$YABRIDGE_REPO")"
+elif [[ ! "$YABRIDGE_REPO" =~ ^(https://|ssh://|git@)[A-Za-z0-9._:/@+-]+$ ]]; then
+    err "--yabridge-repo must be an https://, ssh://, git@ URL or an existing directory: $YABRIDGE_REPO"
+    exit 2
+fi
+# Patches are read before anything is fetched, and remembered by digest only:
+# the path they came from is the operator's business, the bytes are the build's.
+YABRIDGE_PATCH_DIGESTS=""
+for patch in ${YABRIDGE_PATCHES[@]+"${YABRIDGE_PATCHES[@]}"}; do
+    if [[ ! -f "$patch" || ! -r "$patch" ]]; then
+        err "--yabridge-patch: not a readable file: $patch"
+        exit 2
+    fi
+    digest="$(sha256sum -- "$patch" | cut -d' ' -f1)"
+    YABRIDGE_PATCH_DIGESTS="${YABRIDGE_PATCH_DIGESTS:+$YABRIDGE_PATCH_DIGESTS+}$digest"
+done
+[[ -n "$YABRIDGE_PATCH_DIGESTS" ]] || YABRIDGE_PATCH_DIGESTS="none"
 
 if [[ -n "$WINE_VERSION" && ! "$WINE_VERSION" =~ $WINE_VERSION_PATTERN ]]; then
     err "--wine-version must match $WINE_VERSION_PATTERN: $WINE_VERSION"
@@ -244,6 +283,9 @@ STATE_WINE_SHA256_VERIFIED="$(read_state WINE_SHA256_VERIFIED "$STATE_FILE" ||
     true)"
 STATE_YABRIDGE_REF="$(read_state YABRIDGE_REF "$STATE_FILE" || true)"
 STATE_YABRIDGE_COMMIT="$(read_state YABRIDGE_COMMIT "$STATE_FILE" || true)"
+# Older state files predate these two keys; absent means upstream, unpatched.
+STATE_YABRIDGE_REPO="$(read_state YABRIDGE_REPO "$STATE_FILE" || printf '%s\n' "$YABRIDGE_REPO_DEFAULT")"
+STATE_YABRIDGE_PATCHES="$(read_state YABRIDGE_PATCHES "$STATE_FILE" || printf 'none\n')"
 
 # ── Install yabridge build dependencies ──────────────────────────────────────
 info "Checking/installing build dependencies..."
@@ -438,28 +480,46 @@ if [[ "$SKIP_YABRIDGE" == false ]]; then
     assert_locked_build_identity
     # Fetch and resolve the requested ref before deciding whether outputs match.
     if [[ -d "$YABRIDGE_SRC" ]]; then
-        info "Updating yabridge source ($YABRIDGE_BRANCH)..."
+        info "Updating yabridge source ($YABRIDGE_BRANCH from $YABRIDGE_REPO)..."
+        if [[ "$STATE_YABRIDGE_REPO" != "$YABRIDGE_REPO" ]]; then
+            git -C "$YABRIDGE_SRC" remote set-url origin "$YABRIDGE_REPO"
+        fi
     else
-        info "Cloning yabridge ($YABRIDGE_BRANCH)..."
-        git clone --no-checkout \
-            https://github.com/robbert-vdh/yabridge.git "$YABRIDGE_SRC"
+        info "Cloning yabridge ($YABRIDGE_BRANCH from $YABRIDGE_REPO)..."
+        git clone --no-checkout "$YABRIDGE_REPO" "$YABRIDGE_SRC"
     fi
     git -C "$YABRIDGE_SRC" fetch origin "$YABRIDGE_BRANCH"
     YABRIDGE_COMMIT="$(git -C "$YABRIDGE_SRC" rev-parse FETCH_HEAD)"
     git -C "$YABRIDGE_SRC" checkout --detach "$YABRIDGE_COMMIT"
+    if [[ ${#YABRIDGE_PATCHES[@]} -gt 0 ]]; then
+        # Start from the pristine commit so a previous run's patches never
+        # stack, then apply this run's set in order. A patch that does not
+        # apply stops setup before the build, with the previous outputs intact.
+        git -C "$YABRIDGE_SRC" reset --hard "$YABRIDGE_COMMIT"
+        for patch in "${YABRIDGE_PATCHES[@]}"; do
+            info "Applying patch $(basename -- "$patch")..."
+            if ! git -C "$YABRIDGE_SRC" apply --check "$patch"; then
+                err "patch does not apply to $YABRIDGE_COMMIT: $patch"
+                exit 1
+            fi
+            git -C "$YABRIDGE_SRC" apply "$patch"
+        done
+    fi
 
     YABRIDGE_MATCHES=false
     if [[ -f "$YABRIDGE_OUT/libyabridge-vst2.so" ]] &&
         [[ -f "$YABRIDGE_OUT/yabridge-host.exe" ]] &&
         component_matches YABRIDGE_REF "$YABRIDGE_BRANCH" "$STATE_FILE" &&
-        component_matches YABRIDGE_COMMIT "$YABRIDGE_COMMIT" "$STATE_FILE"; then
+        component_matches YABRIDGE_COMMIT "$YABRIDGE_COMMIT" "$STATE_FILE" &&
+        [[ "$STATE_YABRIDGE_REPO" == "$YABRIDGE_REPO" ]] &&
+        [[ "$STATE_YABRIDGE_PATCHES" == "$YABRIDGE_PATCH_DIGESTS" ]]; then
         YABRIDGE_MATCHES=true
     fi
 
     if [[ "$YABRIDGE_MATCHES" == true ]]; then
         info "Yabridge already built at $YABRIDGE_OUT"
     else
-        info "Building yabridge @ $YABRIDGE_COMMIT..."
+        info "Building yabridge @ $YABRIDGE_COMMIT (patches: $YABRIDGE_PATCH_DIGESTS)..."
 
         # Build
         BUILD_DIR="$YABRIDGE_SRC/build"
@@ -485,6 +545,8 @@ if [[ "$SKIP_YABRIDGE" == false ]]; then
 
         STATE_YABRIDGE_REF="$YABRIDGE_BRANCH"
         STATE_YABRIDGE_COMMIT="$YABRIDGE_COMMIT"
+        STATE_YABRIDGE_REPO="$YABRIDGE_REPO"
+        STATE_YABRIDGE_PATCHES="$YABRIDGE_PATCH_DIGESTS"
     fi
 
     # Show built files
@@ -497,7 +559,9 @@ write_state "$STATE_FILE" \
     "WINE_SHA256=$STATE_WINE_SHA256" \
     "WINE_SHA256_VERIFIED=$STATE_WINE_SHA256_VERIFIED" \
     "YABRIDGE_REF=$STATE_YABRIDGE_REF" \
-    "YABRIDGE_COMMIT=$STATE_YABRIDGE_COMMIT"
+    "YABRIDGE_COMMIT=$STATE_YABRIDGE_COMMIT" \
+    "YABRIDGE_REPO=$STATE_YABRIDGE_REPO" \
+    "YABRIDGE_PATCHES=$STATE_YABRIDGE_PATCHES"
 
 # ── Install test harness ─────────────────────────────────────────────────────
 if [[ ! -f "$HARNESS/pyproject.toml" ]]; then

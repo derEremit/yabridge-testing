@@ -8,6 +8,16 @@ Idempotent. Skips already-completed steps. Flags:
 - `--wine-sha256 <digest>` — the SHA-256 that release is expected to have;
   required unless `--no-wine`. Compared before extraction
 - `--yabridge-branch <ref>` — build a specific branch/commit (default: master)
+- `--yabridge-repo <url|dir>` — clone from this repository instead of upstream:
+  an `https://`, `ssh://` or `git@` URL, or an existing local directory (a
+  fork, a mirror, a checkout with local commits). Changing it re-points
+  `origin` of the existing clone and rebuilds
+- `--yabridge-patch <file>` — apply this patch after checkout with
+  `git apply`; repeatable, applied in order on top of a pristine checkout
+  (`reset --hard` first, so patches never stack across runs). A patch that
+  fails `git apply --check` stops setup before the build. Only each patch's
+  SHA-256 is recorded in `component-state.env` (`YABRIDGE_PATCHES`), never
+  its path; a changed patch set rebuilds, an unchanged one is reused
 - `--no-wine` — skip wine (rebuild yabridge only)
 - `--no-yabridge` — skip yabridge (re-download wine only)
 - `-h` / `--help` — usage

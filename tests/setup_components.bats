@@ -355,6 +355,100 @@ run_setup_fixture() {
   grep -q "ninja" "$CALLS"
 }
 
+@test "--yabridge-repo clones from the named repository" {
+  run_setup_fixture --no-wine --yabridge-repo https://example.com/someone/yabridge.git
+
+  [ "$status" -eq 0 ]
+  grep -q "git clone --no-checkout https://example.com/someone/yabridge.git $FIXTURE/build/yabridge-src" "$CALLS"
+  grep -q '^YABRIDGE_REPO=https://example.com/someone/yabridge.git$' "$FIXTURE/build/component-state.env"
+}
+
+@test "a different --yabridge-repo re-points an existing clone and rebuilds" {
+  seed_yabridge_cache
+  printf 'YABRIDGE_REPO=https://github.com/robbert-vdh/yabridge.git\nYABRIDGE_REF=master\nYABRIDGE_COMMIT=%s\nYABRIDGE_PATCHES=none\n' \
+    "$YABRIDGE_COMMIT" > "$FIXTURE/build/component-state.env"
+
+  run_setup_fixture --no-wine --yabridge-repo https://example.com/someone/yabridge.git
+
+  [ "$status" -eq 0 ]
+  grep -q "git -C $FIXTURE/build/yabridge-src remote set-url origin https://example.com/someone/yabridge.git" "$CALLS"
+  grep -q "ninja" "$CALLS"
+}
+
+@test "state without a recorded repository counts as upstream and is reused" {
+  seed_yabridge_cache
+  printf 'YABRIDGE_REF=master\nYABRIDGE_COMMIT=%s\n' "$YABRIDGE_COMMIT" \
+    > "$FIXTURE/build/component-state.env"
+
+  run_setup_fixture --no-wine
+
+  [ "$status" -eq 0 ]
+  refute grep -q "ninja" "$CALLS"
+  refute grep -q "remote set-url" "$CALLS"
+}
+
+@test "--yabridge-patch applies each patch after checkout and records its digest" {
+  printf 'diff --git a/x b/x\n' > "$BATS_TEST_TMPDIR/one.patch"
+  printf 'diff --git a/y b/y\n' > "$BATS_TEST_TMPDIR/two.patch"
+  # The fixture's sha256sum answers FAKE_SHA for every file.
+  local one="$WINE_11_8_SHA" two="$WINE_11_8_SHA"
+
+  run_setup_fixture --no-wine \
+    --yabridge-patch "$BATS_TEST_TMPDIR/one.patch" \
+    --yabridge-patch "$BATS_TEST_TMPDIR/two.patch"
+
+  [ "$status" -eq 0 ]
+  grep -q "git -C $FIXTURE/build/yabridge-src reset --hard 48ea974" "$CALLS"
+  grep -q "git -C $FIXTURE/build/yabridge-src apply --check $BATS_TEST_TMPDIR/one.patch" "$CALLS"
+  grep -q "git -C $FIXTURE/build/yabridge-src apply $BATS_TEST_TMPDIR/one.patch" "$CALLS"
+  grep -q "git -C $FIXTURE/build/yabridge-src apply $BATS_TEST_TMPDIR/two.patch" "$CALLS"
+  grep -q "^YABRIDGE_PATCHES=$one+$two\$" "$FIXTURE/build/component-state.env"
+  # The patch path is the operator's; only the digest is recorded.
+  refute grep -q "$BATS_TEST_TMPDIR" "$FIXTURE/build/component-state.env"
+  grep -q "ninja" "$CALLS"
+}
+
+@test "an unchanged patch set is reused without a rebuild" {
+  seed_yabridge_cache
+  printf 'diff --git a/x b/x\n' > "$BATS_TEST_TMPDIR/one.patch"
+  local one="$WINE_11_8_SHA"
+  printf 'YABRIDGE_REPO=https://github.com/robbert-vdh/yabridge.git\nYABRIDGE_REF=master\nYABRIDGE_COMMIT=%s\nYABRIDGE_PATCHES=%s\n' \
+    "$YABRIDGE_COMMIT" "$one" > "$FIXTURE/build/component-state.env"
+
+  run_setup_fixture --no-wine --yabridge-patch "$BATS_TEST_TMPDIR/one.patch"
+
+  [ "$status" -eq 0 ]
+  refute grep -q "ninja" "$CALLS"
+}
+
+@test "a changed patch set rebuilds" {
+  seed_yabridge_cache
+  printf 'diff --git a/x b/x\n' > "$BATS_TEST_TMPDIR/one.patch"
+  printf 'YABRIDGE_REPO=https://github.com/robbert-vdh/yabridge.git\nYABRIDGE_REF=master\nYABRIDGE_COMMIT=%s\nYABRIDGE_PATCHES=none\n' \
+    "$YABRIDGE_COMMIT" > "$FIXTURE/build/component-state.env"
+
+  run_setup_fixture --no-wine --yabridge-patch "$BATS_TEST_TMPDIR/one.patch"
+
+  [ "$status" -eq 0 ]
+  grep -q "ninja" "$CALLS"
+}
+
+@test "a missing patch file is refused before anything is fetched" {
+  run_setup_fixture --no-wine --yabridge-patch "$BATS_TEST_TMPDIR/absent.patch"
+
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"--yabridge-patch: not a readable file"* ]]
+  refute grep -q '^git ' "$CALLS"
+}
+
+@test "a repository that is neither a git URL nor a local directory is refused" {
+  run_setup_fixture --no-wine --yabridge-repo 'ftp://example.com/x.git'
+
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"--yabridge-repo must be an https://, ssh://, git@ URL or an existing directory"* ]]
+  refute grep -q '^git ' "$CALLS"
+}
+
 @test "moved yabridge branch resolves fetched commit and rebuilds" {
   seed_yabridge_cache
   printf 'YABRIDGE_REF=master\nYABRIDGE_COMMIT=old-commit\n' \

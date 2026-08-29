@@ -55,6 +55,8 @@ launch requires that record and re-verifies rather than trusting a bare hash.
 ./setup.sh --no-wine                                       # rebuild yabridge from latest master
 ./setup.sh --no-yabridge --wine-version 11.17 --wine-sha256 <digest>   # move Wine
 ./setup.sh --yabridge-branch <ref> --no-wine               # a branch, tag, commit, or PR head to test
+./setup.sh --yabridge-repo https://github.com/<you>/yabridge.git --yabridge-branch <ref> --no-wine   # a fork
+./setup.sh --yabridge-patch fix.patch --yabridge-patch more.patch --no-wine   # patches on top, in order
 ```
 
 Requirements: `gcc >= 10`, `meson`, `ninja`, `wine` + `winegcc`, `libxcb`;

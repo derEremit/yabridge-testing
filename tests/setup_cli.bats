@@ -31,6 +31,18 @@ load test_helper
   [[ "$output" == *"--yabridge-branch requires a value"* ]]
 }
 
+@test "setup rejects a missing yabridge repo" {
+  run_setup --yabridge-repo
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"--yabridge-repo requires a value"* ]]
+}
+
+@test "setup rejects a missing yabridge patch" {
+  run_setup --yabridge-patch --no-wine
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"--yabridge-patch requires a value"* ]]
+}
+
 @test "DAW launcher rejects a missing prefix value" {
   run_daw_env --prefix
   [ "$status" -eq 2 ]
