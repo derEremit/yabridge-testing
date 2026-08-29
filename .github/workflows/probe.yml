@@ -2,7 +2,7 @@ name: Probe Build and Tests
 
 on:
   push:
-    branches: [main]
+    branches: [master]
     paths:
       - 'probe/**'
       - 'test-harness/tests/test_probe_artifact.py'
@@ -10,7 +10,7 @@ on:
       - 'test-harness/tests/test_probe_transport.py'
       - '.github/workflows/probe.yml'
   pull_request:
-    branches: [main]
+    branches: [master]
     paths:
       - 'probe/**'
       - 'test-harness/tests/test_probe_artifact.py'

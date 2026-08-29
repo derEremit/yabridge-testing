@@ -9,7 +9,7 @@ Publish**.
 | Area | Status |
 |---|---|
 | Isolated Bitwig + XLN authorize on clone | Closed |
-| Harness sanitizer + `submit --session` | Committed `bc67fb9`, pushed to GitHub |
+| Harness sanitizer + `submit --session` | Committed `bc67fb9`, on GitHub `master` (default; `main` deleted 2026-08-30) |
 | Site: 1.1.0 fields, path drop, Save-then-Publish editor | Committed `3b6289e`, pushed to GitLab, **deployed to Fly 2026-08-29** |
 | Live Fly | Accepts 1.1.0; Save keeps the link, Publish spends it |
 | First report | **Published**: <https://yabridge-tests.fly.dev/results/2> (JSON at `/api/v1/results/2`). Verdict partial, AD2 vst3 partial, issue "one click needed before clicks register". Draft **id 1** is a junk acceptance probe — never publish it |

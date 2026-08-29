@@ -2,12 +2,12 @@ name: Ansible syntax
 
 on:
   push:
-    branches: [main]
+    branches: [master]
     paths:
       - 'ansible/**'
       - '.github/workflows/ansible.yml'
   pull_request:
-    branches: [main]
+    branches: [master]
     paths:
       - 'ansible/**'
       - '.github/workflows/ansible.yml'

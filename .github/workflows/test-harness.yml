@@ -2,12 +2,12 @@ name: Test Harness
 
 on:
   push:
-    branches: [main]
+    branches: [master]
     paths:
       - 'test-harness/**'
       - '.github/workflows/test-harness.yml'
   pull_request:
-    branches: [main]
+    branches: [master]
     paths:
       - 'test-harness/**'
       - '.github/workflows/test-harness.yml'
