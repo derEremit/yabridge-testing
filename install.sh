@@ -1,10 +1,10 @@
 #!/bin/bash
 # Yabridge Test Harness Installer
-# Usage: curl -fsSL https://yabridge-tests.fly.dev/install.sh | bash
+# Usage: curl -fsSL https://raw.githubusercontent.com/derEremit/yabridge-testing/main/install.sh | bash
 
 set -e
 
-REPO_URL="https://github.com/derEremit/yabridge-staging"
+REPO_URL="https://github.com/derEremit/yabridge-testing"
 INSTALL_DIR="${YABRIDGE_TEST_HOME:-$HOME/.yabridge-test}"
 
 echo "=== Yabridge Test Harness Installer ==="
@@ -46,7 +46,7 @@ else
         # Fallback: download tarball if git clone fails
         echo "Git clone failed, downloading tarball..."
         curl -fsSL "$REPO_URL/archive/main.tar.gz" | tar -xz -C "$INSTALL_DIR"
-        mv "$INSTALL_DIR/yabridge-staging-main" "$INSTALL_DIR/repo"
+        mv "$INSTALL_DIR/yabridge-testing-main" "$INSTALL_DIR/repo"
     }
 fi
 

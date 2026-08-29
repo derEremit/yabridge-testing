@@ -1,4 +1,4 @@
-# Yabridge Staging — Isolated Test Infrastructure
+# yabridge-testing — Isolated Test Infrastructure
 
 Build and test **yabridge git master** with a **pinned, digest-verified
 wine-staging build** in complete
@@ -66,8 +66,8 @@ isolation. No system files are touched — everything lives in `build/`,
 ### First time
 
 ```bash
-git clone https://github.com/derEremit/yabridge-staging
-cd yabridge-staging
+git clone https://github.com/derEremit/yabridge-testing
+cd yabridge-testing
 ```
 
 Installing Wine means running bytes fetched over the network, so `setup.sh`
