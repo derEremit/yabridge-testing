@@ -1,6 +1,6 @@
 #!/bin/bash
 # Yabridge Test Harness Installer
-# Usage: curl -fsSL https://raw.githubusercontent.com/derEremit/yabridge-testing/main/install.sh | bash
+# Usage: curl -fsSL https://raw.githubusercontent.com/derEremit/yabridge-testing/master/install.sh | bash
 
 set -e
 
