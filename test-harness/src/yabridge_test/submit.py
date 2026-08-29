@@ -5,6 +5,7 @@ from pathlib import Path
 
 import httpx
 
+from .sanitize import payload_for_submit
 from .schemas import SubmitResponse, TestReport
 
 DEFAULT_API_URL = "https://yabridge-tests.fly.dev"
@@ -63,7 +64,7 @@ class ResultSubmitter:
             with httpx.Client(timeout=self.timeout) as client:
                 response = client.post(
                     url,
-                    json=report.model_dump(mode="json"),
+                    json=payload_for_submit(report),
                     headers=self._get_headers(),
                 )
 

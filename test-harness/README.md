@@ -87,7 +87,12 @@ yabridge-test suite --plugin /path/to/plugin.vst3 --submit
 ```bash
 yabridge-test plugin /path/to/plugin.vst3
 yabridge-test submit --file results.json
+yabridge-test submit --session
+yabridge-test probe --submit
 ```
+
+Submit always POSTs `/api/v1/drafts` and prints an edit URL. Use `--dry-run`
+to print the sanitized payload without sending it.
 
 ## Result semantics
 

@@ -16,8 +16,10 @@ from . import __version__
 from .environment import collect_environment
 from .probe.runner import ProbeOptions, WineChildWindowTest
 from .probe.scenarios import SCENARIO_NAMES
-from .schemas import ResultSummary, SingleTestResult, TestReport, TestResult
-from .submit import DEFAULT_API_URL, ResultSubmitter, SubmitError, save_report
+from .sanitize import payload_for_submit
+from .schemas import ResultSummary, SingleTestResult, SubmitResponse, TestReport, TestResult
+from .session_report import build_session_report
+from .submit import DEFAULT_API_URL, ResultSubmitter, SubmitError, load_report, save_report
 from .tests import PluginLoadTest, PointerBackendSanity
 
 console = Console()
@@ -53,6 +55,49 @@ def _display_results(results: Sequence[SingleTestResult]) -> None:
         console.print(f"{icon} {result.name}: {result.details or result.result.value}")
 
 
+def _print_draft_response(response: SubmitResponse) -> bool:
+    """Print a draft-submit result. Returns True when the POST succeeded."""
+    if not response.success:
+        console.print(f"[red]✗ {response.message or 'Submission failed'}[/red]")
+        return False
+    console.print(f"[green]✓ {response.message}[/green]")
+    if response.report_id:
+        console.print(f"  Draft ID: {response.report_id}")
+    completion_url = response.completion_url or response.url
+    if completion_url:
+        console.print()
+        console.print("[bold cyan]Edit your report at:[/bold cyan]")
+        console.print(f"  [link={completion_url}]{completion_url}[/link]")
+        console.print()
+        console.print(
+            "[dim]The report stays private until you publish it on that page.[/dim]"
+        )
+    return True
+
+
+def _maybe_submit(
+    report: TestReport,
+    *,
+    server: str,
+    submit: bool,
+    dry_run: bool = False,
+) -> bool:
+    """POST a draft or print a sanitized payload. True when submission failed."""
+    if dry_run:
+        console.print(json.dumps(payload_for_submit(report), indent=2, default=str))
+        return False
+    if not submit:
+        return False
+    console.print(f"\nSubmitting draft to {server}...")
+    submitter = ResultSubmitter(api_url=server)
+    try:
+        response = submitter.submit(report)
+    except SubmitError as exc:
+        console.print(f"[red]✗ Submission error: {exc}[/red]")
+        return True
+    return not _print_draft_response(response)
+
+
 @main.command()
 @click.option("--scenario", type=click.Choice(SCENARIO_NAMES))
 @click.option("--headless/--no-headless", default=True, show_default=True)
@@ -70,6 +115,9 @@ def _display_results(results: Sequence[SingleTestResult]) -> None:
 @click.option("--samples", type=click.IntRange(min=1), default=1, show_default=True)
 @click.option("--tolerance", type=click.IntRange(min=0), default=2, show_default=True)
 @click.option("--json", "as_json", is_flag=True, help="Output machine-readable JSON")
+@click.option("--submit/--no-submit", default=False, help="Submit a sanitized draft")
+@click.option("--dry-run", is_flag=True, help="Print the sanitized draft JSON and do not POST")
+@click.option("--server", default=DEFAULT_API_URL, help="API server URL")
 def probe(
     scenario: str | None,
     headless: bool,
@@ -79,6 +127,9 @@ def probe(
     samples: int,
     tolerance: int,
     as_json: bool,
+    submit: bool,
+    dry_run: bool,
+    server: str,
 ) -> None:
     """Run measured bridged Wine child-window coordinate scenarios."""
     options = ProbeOptions(
@@ -110,7 +161,18 @@ def probe(
             f"Passed: {summary.passed}  Failed: {summary.failed}  "
             f"Errors: {summary.errors}  Skipped: {summary.skipped}"
         )
-    exit_for_results(results)
+    submission_failed = False
+    if submit or dry_run:
+        report = TestReport(
+            timestamp=datetime.now(timezone.utc),
+            environment=collect_environment(),
+            tests=results,
+            session_type="probe",
+        )
+        submission_failed = _maybe_submit(
+            report, server=server, submit=submit, dry_run=dry_run
+        )
+    exit_for_results(results, submission_failed=submission_failed)
 
 
 @main.command()
@@ -192,6 +254,7 @@ def validate(output: str | None) -> None:
             timestamp=datetime.now(timezone.utc),
             environment=env,
             tests=results,
+            session_type="probe",
         )
         save_report(report, output)
         console.print(f"\n[green]Results saved to {output}[/green]")
@@ -243,6 +306,7 @@ def plugin(plugin_path: str, output: str | None) -> None:
             environment=env,
             plugin=plugin_info,
             tests=results,
+            session_type="plugin",
         )
         save_report(report, output)
         console.print(f"\n[green]Results saved to {output}[/green]")
@@ -254,13 +318,15 @@ def plugin(plugin_path: str, output: str | None) -> None:
 @click.option("--host", "-h", default=None, help="DAW host name (e.g., ardour, carla)")
 @click.option("--plugin", "-p", type=click.Path(exists=True), help="Plugin to test")
 @click.option("--output", "-o", type=click.Path(), help="Save results to file")
-@click.option("--submit/--no-submit", default=False, help="Submit results to API")
+@click.option("--submit/--no-submit", default=False, help="Submit a sanitized draft")
+@click.option("--dry-run", is_flag=True, help="Print the sanitized draft JSON and do not POST")
 @click.option("--server", default=DEFAULT_API_URL, help="API server URL")
 def suite(
     host: str | None,
     plugin: str | None,
     output: str | None,
     submit: bool,
+    dry_run: bool,
     server: str,
 ) -> None:
     """Run full test suite."""
@@ -292,6 +358,7 @@ def suite(
         host=host,
         plugin=plugin_info,
         tests=all_results,
+        session_type="suite",
     )
 
     # Display summary
@@ -310,85 +377,82 @@ def suite(
         save_report(report, output)
         console.print(f"\n[green]Results saved to {output}[/green]")
 
-    # Submit to API
-    submission_failed = False
-    if submit:
-        console.print(f"\nSubmitting to {server}...")
-        submitter = ResultSubmitter(api_url=server)
-        try:
-            response = submitter.submit(report)
-            if response.success:
-                console.print("[green]✓ Submitted successfully[/green]")
-                if response.url:
-                    console.print(f"  View at: {response.url}")
-            else:
-                console.print(f"[red]✗ Submission failed: {response.message}[/red]")
-                submission_failed = True
-        except SubmitError as e:
-            console.print(f"[red]✗ Submission error: {e}[/red]")
-            submission_failed = True
+    submission_failed = _maybe_submit(
+        report, server=server, submit=submit, dry_run=dry_run
+    )
 
     exit_for_results(all_results, submission_failed=submission_failed)
 
 
 @main.command()
 @click.option("--file", "-f", type=click.Path(exists=True), help="Results file to submit")
+@click.option(
+    "--session",
+    is_flag=True,
+    help="Submit isolated-DAW session notes (environment + run-manifest scalars)",
+)
+@click.option("--notes", help="Notes to include on the draft")
+@click.option(
+    "--notes-file",
+    type=click.Path(exists=True),
+    help="Read notes from a file (ignored when --notes is set)",
+)
+@click.option("--dry-run", is_flag=True, help="Print the sanitized draft JSON and do not POST")
 @click.option("--server", default=DEFAULT_API_URL, help="API server URL")
 @click.option("--api-key", envvar="YABRIDGE_API_KEY", help="API key for authentication")
-def submit(file: str | None, server: str, api_key: str | None) -> None:
-    """Submit test results to the collection server."""
-    submitter = ResultSubmitter(api_url=server, api_key=api_key)
+def submit(
+    file: str | None,
+    session: bool,
+    notes: str | None,
+    notes_file: str | None,
+    dry_run: bool,
+    server: str,
+    api_key: str | None,
+) -> None:
+    """Submit a sanitized draft. Prints an edit URL. Never publishes."""
+    if session and file:
+        raise click.UsageError("Use --session or --file, not both")
 
-    # Check connection
-    console.print(f"Connecting to {server}...")
-    if not submitter.check_connection():
-        console.print("[yellow]Warning: Could not verify API connection[/yellow]")
+    session_notes = notes
+    if session_notes is None and notes_file:
+        session_notes = Path(notes_file).read_text(encoding="utf-8")
 
-    if file:
-        # Submit from file
-        console.print(f"Submitting results from {file}...")
-        try:
-            response = submitter.submit_from_file(file)
-        except SubmitError as e:
-            console.print(f"[red]Error: {e}[/red]")
-            sys.exit(1)
+    if session:
+        report = build_session_report(notes=session_notes)
+    elif file:
+        report = load_report(file)
+        if session_notes:
+            report = report.model_copy(update={"notes": session_notes})
     else:
-        # Run tests and submit
         console.print("Running tests...")
         env = collect_environment()
-
         results = PointerBackendSanity().run_all()
         results.extend(WineChildWindowTest().run_all())
-
         report = TestReport(
             timestamp=datetime.now(timezone.utc),
             environment=env,
             tests=results,
+            notes=session_notes,
+            session_type="probe",
         )
 
-        console.print("Submitting results...")
-        try:
-            response = submitter.submit(report)
-        except SubmitError as e:
-            console.print(f"[red]Error: {e}[/red]")
-            sys.exit(1)
+    if dry_run:
+        click.echo(json.dumps(payload_for_submit(report), indent=2, default=str))
+        return
 
-    if response.success:
-        console.print(f"[green]✓ {response.message}[/green]")
-        if response.report_id:
-            console.print(f"  Draft ID: {response.report_id}")
-        if response.completion_url:
-            console.print()
-            console.print("[bold cyan]Complete your submission at:[/bold cyan]")
-            console.print(f"  [link={response.completion_url}]{response.completion_url}[/link]")
-            console.print()
-            console.print(
-                "[dim]Your draft will be published after you answer a few questions.[/dim]"
-            )
-        elif response.url:
-            console.print(f"  View at: {response.url}")
-    else:
-        console.print(f"[red]✗ {response.message}[/red]")
+    submitter = ResultSubmitter(api_url=server, api_key=api_key)
+    console.print(f"Connecting to {server}...")
+    if not submitter.check_connection():
+        console.print("[yellow]Warning: Could not verify API connection[/yellow]")
+
+    console.print("Submitting sanitized draft...")
+    try:
+        response = submitter.submit(report)
+    except SubmitError as exc:
+        console.print(f"[red]Error: {exc}[/red]")
+        sys.exit(1)
+
+    if not _print_draft_response(response):
         sys.exit(1)
 
 

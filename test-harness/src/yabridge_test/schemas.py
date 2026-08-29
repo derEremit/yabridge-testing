@@ -75,8 +75,20 @@ class Environment(BaseModel):
         default=None,
         description="Wine variant (staging, tkg, ge, proton)",
     )
-    wine_prefix: str | None = Field(default=None, description="Wine prefix path")
+    wine_prefix: str | None = Field(default=None, description="Wine prefix path (local only)")
+    wine_prefix_kind: str | None = Field(
+        default=None,
+        description="Prefix class: temp-probe, isolated, clone, production, unknown",
+    )
     wine_dpi: int | None = Field(default=None, description="Wine DPI setting (from winecfg)")
+    wine_digest_verified: bool | None = Field(
+        default=None,
+        description="Whether the Kron4ek archive digest was verified",
+    )
+    wine_sha256: str | None = Field(
+        default=None,
+        description="SHA-256 of the verified Wine archive",
+    )
 
     # Yabridge
     yabridge_version: str = Field(description="Yabridge version")
@@ -169,6 +181,13 @@ class TestReport(BaseModel):
     logs: str | None = Field(default=None, description="Relevant log output")
     screenshots: list[str] = Field(
         default_factory=list, description="Base64-encoded screenshots"
+    )
+
+    # How the data was produced (probe, suite, plugin, isolated-daw, web-manual)
+    session_type: str | None = Field(default=None, description="How this report was produced")
+    regression: bool | None = Field(
+        default=None,
+        description="Whether this used to work and now does not",
     )
 
     # Submission metadata

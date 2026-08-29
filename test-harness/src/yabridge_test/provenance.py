@@ -111,6 +111,7 @@ def _parse_manifest(path: Path) -> dict[str, Any]:
         "yabridge_requested_ref": ref,
         "yabridge_commit": commit,
         "bridge_roots": bridge_roots,
+        "raw": document,
     }
 
 
@@ -152,3 +153,53 @@ def resolve_test_root(environ: Mapping[str, str]) -> Path | None:
     if not root:
         return None
     return Path(root)
+
+
+@dataclass(frozen=True)
+class SessionScalars:
+    """Public-safe scalars from a run-manifest. No path fields."""
+
+    wine_version: str | None = None
+    wine_sha256: str | None = None
+    wine_digest_verified: bool | None = None
+    yabridge_commit: str | None = None
+    yabridge_ref: str | None = None
+    host: str | None = None
+
+
+def load_session_scalars(root: Path) -> SessionScalars | None:
+    """Read wine / yabridge / DAW basename from the run-manifest.
+
+    Path fields (clone, source, bridges, executables) are not returned.
+    """
+    manifest_path = root / "run-state" / "run-manifest.json"
+    if not manifest_path.is_file():
+        return None
+
+    document = _parse_manifest(manifest_path)
+    raw = document.get("raw") or {}
+
+    wine_version = _optional_text(
+        raw.get("wine_version_string")
+    ) or _optional_text(raw.get("wine_installed_version"))
+    wine_sha256 = _optional_text(raw.get("wine_sha256"))
+    digest = raw.get("wine_digest_verified")
+    wine_digest_verified = digest if isinstance(digest, bool) else None
+
+    daw = raw.get("daw_executable")
+    host = Path(daw).name if isinstance(daw, str) and daw else None
+
+    return SessionScalars(
+        wine_version=wine_version,
+        wine_sha256=wine_sha256,
+        wine_digest_verified=wine_digest_verified,
+        yabridge_commit=document.get("yabridge_commit"),
+        yabridge_ref=document.get("yabridge_requested_ref"),
+        host=host,
+    )
+
+
+def _optional_text(value: object) -> str | None:
+    if isinstance(value, str) and value:
+        return value
+    return None

@@ -110,15 +110,33 @@ yabridge-test plugin /path/to/plugin.vst3
 yabridge-test suite
 ```
 
-### 4. Submit Results
+### 4. Submit a draft
+
+Every submit path POSTs a sanitized draft and prints an edit URL. Nothing is
+published until you open that URL, fill notes / plugins / verdict, and click
+Publish. **Save** keeps the report private and the link usable so you can come
+back and edit; **Publish** makes it public and retires the link. Home paths,
+prefix paths, and plugin paths are stripped before HTTP.
+
+Until the results site with the Save/Publish editor is deployed, the live
+site publishes on the first submit of the form and the link then stops
+working — fill everything in before you submit.
 
 ```bash
-# Submit to the public results server
-yabridge-test submit
+# Isolated-DAW session (environment + run-manifest scalars, no probe rows)
+./test.sh submit --session
+# or: yabridge-test submit --session --notes "optional local notes"
 
-# Or run tests and submit in one command
-yabridge-test suite --submit
+# Probe or suite, then the same edit URL
+./test.sh probe --submit
+./test.sh suite --submit
+
+# Or submit a previously saved report file
+yabridge-test submit --file results.json
 ```
+
+`--dry-run` prints the sanitized JSON and does not POST. Session-specific
+operator notes stay in gitignored `run-state/` and are not this repository.
 
 ## Building VM Images
 
