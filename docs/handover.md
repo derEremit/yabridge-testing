@@ -12,7 +12,7 @@ Publish**.
 | Harness sanitizer + `submit --session` | Committed `bc67fb9`, pushed to GitHub |
 | Site: 1.1.0 fields, path drop, Save-then-Publish editor | Committed `3b6289e`, pushed to GitLab, **deployed to Fly 2026-08-29** |
 | Live Fly | Accepts 1.1.0; Save keeps the link, Publish spends it |
-| First report | Draft **id 2** created by `./test.sh submit --session`; edit URL is in Sebastian's terminal, not here. Draft **id 1** is a junk acceptance probe — never publish it |
+| First report | **Published**: <https://yabridge-tests.fly.dev/results/2> (JSON at `/api/v1/results/2`). Verdict partial, AD2 vst3 partial, issue "one click needed before clicks register". Draft **id 1** is a junk acceptance probe — never publish it |
 | Further commits / deploys / live POSTs | Only when Sebastian asks |
 
 ## Hard rules
@@ -171,8 +171,9 @@ home path, MAC, LAN IP, email, or ComputerId.
 
 `fly` is at `~/.fly/bin/fly` (not on PATH). Deploy is
 `fly deploy -a yabridge-tests --now` from `~/projects/yabridge-results`;
-the app migrates itself on start. Verified live after deploy: 1.1.0 draft
-→ 201, complete page shows the new copy. Next deploys: same command,
+the app migrates itself on start. Deployed twice on the 29th: `3b6289e` (editor + 1.1.0) and `1ae9842`
+(public JSON carries the tester's answers; `/results/{id}` detail page,
+`/results?id=` redirects there). Verified live on report 2. Next deploys: same command,
 after tests are green.
 
 ## Relaunch — generic flags only
