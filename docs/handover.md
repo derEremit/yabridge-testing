@@ -1,17 +1,19 @@
 # Handover — yabridge isolated test infra
 
-Snapshot: **2026-08-29 ~18:00 CEST**. Continue from this file, not the prior
+Snapshot: **2026-08-29 ~19:15 CEST**. Continue from this file, not the prior
 chat. Isolation for Bitwig and the XLN installer is **closed**. The first
-public report path is **implemented on both trees, committed on neither,
-deployed nowhere**.
+public report path is **committed on both trees and deployed**; the first
+real report is a **private draft (id 2) waiting for Sebastian to edit and
+Publish**.
 
 | Area | Status |
 |---|---|
 | Isolated Bitwig + XLN authorize on clone | Closed |
-| Harness sanitizer + `submit --session` | In staging tree, tests green, not committed |
-| Site: 1.1.0 fields, path drop, Save-then-Publish editor | In results tree, 1489 tests green, not committed |
-| Live Fly | **Still old code**: one-shot publish, 422 on 1.1.0 payloads |
-| Commit / push / `fly deploy` / live POST | Do not do unless Sebastian asks |
+| Harness sanitizer + `submit --session` | Committed `bc67fb9`, pushed to GitHub |
+| Site: 1.1.0 fields, path drop, Save-then-Publish editor | Committed `3b6289e`, pushed to GitLab, **deployed to Fly 2026-08-29** |
+| Live Fly | Accepts 1.1.0; Save keeps the link, Publish spends it |
+| First report | Draft **id 2** created by `./test.sh submit --session`; edit URL is in Sebastian's terminal, not here. Draft **id 1** is a junk acceptance probe — never publish it |
+| Further commits / deploys / live POSTs | Only when Sebastian asks |
 
 ## Hard rules
 
@@ -165,16 +167,13 @@ home path, MAC, LAN IP, email, or ComputerId.
 - `wine_prefix` is stored as `None`; `to_dict`, `/api/v1/results`, and the
   complete page never emit it.
 
-### Deploy sequence when Sebastian asks
+### Deploy (done 2026-08-29)
 
-1. Commit the results tree (`fly.toml` env vars are part of it).
-2. `fly deploy` from `~/projects/yabridge-results`. Confirm
-   `GET /complete/<any token>` page shows both buttons.
-3. Then, and only then, `./test.sh submit --session` from staging, open the
-   printed URL, Save, edit, Publish.
-
-Until step 2 is live: `POST /api/v1/drafts` on Fly **422s** on the 1.1.0
-payload, and a completion POST publishes immediately.
+`fly` is at `~/.fly/bin/fly` (not on PATH). Deploy is
+`fly deploy -a yabridge-tests --now` from `~/projects/yabridge-results`;
+the app migrates itself on start. Verified live after deploy: 1.1.0 draft
+→ 201, complete page shows the new copy. Next deploys: same command,
+after tests are green.
 
 ## Relaunch — generic flags only
 
@@ -208,7 +207,6 @@ wants a new clone (that drops license state).
 
 | Risk | Why it matters | Owner |
 |---|---|---|
-| Live Fly is behind two trees | 422 on submit; first complete click publishes | Commit + `fly deploy` when asked |
 | Two-repo ownership | Public GitHub testing repo vs private GitLab results. Do not mix remotes | Sebastian |
 | Secrets in public tree | Scrubbed on the 29th from README, `docs/xln-isolated-installer.md`, `daw-env.sh`, `lib/sandbox.sh` defaults, bats fixtures (fixtures now use `02:00:5e:00:53:01` / `192.0.2.132`). Re-grep before any commit for every value in `run-state/identity.env` plus `/home/<user>`; the result must be empty | Whoever commits |
 | README clone URL | `yabridge-staging` vs origin `yabridge-testing` | Sebastian |
@@ -221,8 +219,10 @@ wants a new clone (that drops license state).
 - Exact plugin list for the first-click note.
 - Whether pasta vs Firejail L2 will bite a later XLN run.
 - Whether the README clone-URL mismatch is an intentional rename.
-- The new complete-page JS in a real browser (covered by server-side tests
-  only; `complete.js` Save/Publish path is untested by JS unit tests).
+- The new complete-page JS in a real browser (server-side tests only).
+  Sebastian's edit of draft id 2 is the first browser exercise of Save /
+  Publish; if the page misbehaves, `POST /api/v1/complete/{token}` with
+  `{"publish": true, ...}` from curl is the fallback.
 
-This pass did not commit, deploy, or POST a live report. It did install dev
-deps into both `.venv`s.
+Dev deps are installed in both `.venv`s. The results repo's `.dockerignore`
+excludes `.venv/` and caches from the Fly build context.
