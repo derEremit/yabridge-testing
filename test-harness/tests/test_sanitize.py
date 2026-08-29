@@ -97,7 +97,7 @@ def test_payload_strips_home_paths_and_operator_identifiers() -> None:
     assert yabridge["mode"] == "chainloader"
     assert "yabridge_log_tail" not in payload["tests"][0]["measurements"]
     assert payload["session_type"] == "isolated-daw"
-    assert payload["report_version"] == "1.1.0"
+    assert payload["report_version"] == "1.2.0"
     assert "submitter_contact" not in payload
 
 

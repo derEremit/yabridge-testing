@@ -44,6 +44,13 @@ RUN_MANIFEST_WINE_SHA256_PATTERN='^[0-9a-fA-F]{64}$'
 RUN_MANIFEST_WINE_VERIFIED_KEY="WINE_SHA256_VERIFIED"
 RUN_MANIFEST_YABRIDGE_REF_PATTERN='^[A-Za-z0-9][A-Za-z0-9._/+@-]*$'
 RUN_MANIFEST_YABRIDGE_COMMIT_PATTERN='^[0-9a-fA-F]{40}$'
+# A repository is a git URL or a local directory; a patch set is "none" or
+# SHA-256 digests joined by "+". Both keys are absent from state written by
+# older setups, which built upstream and unpatched.
+RUN_MANIFEST_YABRIDGE_REPO_PATTERN='^(https://|ssh://|git@|/)[A-Za-z0-9._:/@+-]+$'
+RUN_MANIFEST_YABRIDGE_REPO_DEFAULT="https://github.com/robbert-vdh/yabridge.git"
+RUN_MANIFEST_YABRIDGE_PATCHES_PATTERN='^(none|[0-9a-f]{64}(\+[0-9a-f]{64})*)$'
+RUN_MANIFEST_YABRIDGE_PATCHES_DEFAULT="none"
 
 # Inputs the launcher fills in once every earlier phase has succeeded.
 RUN_MANIFEST_SOURCE=""
@@ -340,6 +347,22 @@ run_manifest_verify_clone_identity() {
 # key and value shape instead of sourcing the file. A value that does not match
 # is absent as far as this manifest is concerned, so an injected command never
 # becomes a version string, let alone runs.
+# A key older state never wrote: absent means the default, present means it
+# must be well-formed. Absent and malformed are different answers.
+run_manifest_optional_state_value() {
+    local key="$1"
+    local pattern="$2"
+    local file="$3"
+    local default="$4"
+    local value
+
+    if ! grep -qE "^${key}=" "$file"; then
+        printf '%s\n' "$default"
+        return 0
+    fi
+    run_manifest_state_value "$key" "$pattern" "$file"
+}
+
 run_manifest_state_value() {
     local key="$1"
     local pattern="$2"
@@ -590,6 +613,12 @@ assert_recorded_components() {
         "$RUN_MANIFEST_YABRIDGE_REF_PATTERN" "$state" > /dev/null || return 1
     run_manifest_state_value YABRIDGE_COMMIT \
         "$RUN_MANIFEST_YABRIDGE_COMMIT_PATTERN" "$state" > /dev/null || return 1
+    run_manifest_optional_state_value YABRIDGE_REPO \
+        "$RUN_MANIFEST_YABRIDGE_REPO_PATTERN" "$state" \
+        "$RUN_MANIFEST_YABRIDGE_REPO_DEFAULT" > /dev/null || return 1
+    run_manifest_optional_state_value YABRIDGE_PATCHES \
+        "$RUN_MANIFEST_YABRIDGE_PATCHES_PATTERN" "$state" \
+        "$RUN_MANIFEST_YABRIDGE_PATCHES_DEFAULT" > /dev/null || return 1
 }
 
 write_run_manifest() {
@@ -646,6 +675,7 @@ write_run_manifest() {
     local __run_manifest_daw __run_manifest_bwrap
     local __run_manifest_wine_version __run_manifest_wine_digest
     local __run_manifest_yabridge_ref __run_manifest_yabridge_commit
+    local __run_manifest_yabridge_repo __run_manifest_yabridge_patches
     local __run_manifest_generated_at
 
     __run_manifest_destination="$(run_manifest_destination "$1")" || return 1
@@ -683,6 +713,12 @@ write_run_manifest() {
     __run_manifest_yabridge_commit="$(run_manifest_state_value \
         YABRIDGE_COMMIT "$RUN_MANIFEST_YABRIDGE_COMMIT_PATTERN" \
         "$__run_manifest_state")" || return 1
+    __run_manifest_yabridge_repo="$(run_manifest_optional_state_value \
+        YABRIDGE_REPO "$RUN_MANIFEST_YABRIDGE_REPO_PATTERN" \
+        "$__run_manifest_state" "$RUN_MANIFEST_YABRIDGE_REPO_DEFAULT")" || return 1
+    __run_manifest_yabridge_patches="$(run_manifest_optional_state_value \
+        YABRIDGE_PATCHES "$RUN_MANIFEST_YABRIDGE_PATCHES_PATTERN" \
+        "$__run_manifest_state" "$RUN_MANIFEST_YABRIDGE_PATCHES_DEFAULT")" || return 1
 
     run_manifest_wine_identity "$__run_manifest_wine" \
         "$__run_manifest_wine_version" || return 1
@@ -712,7 +748,9 @@ write_run_manifest() {
         "$__run_manifest_yabridgectl" \
         "$__run_manifest_bridge_home" \
         "$__run_manifest_daw" \
-        "$__run_manifest_bwrap"
+        "$__run_manifest_bwrap" \
+        "$__run_manifest_yabridge_repo" \
+        "$__run_manifest_yabridge_patches"
 }
 
 # Every value reaches the encoder as an environment scalar, so JSON is built by
@@ -734,6 +772,8 @@ run_manifest_encode() {
     local bridge_home="${12}"
     local daw="${13}"
     local bwrap="${14}"
+    local yabridge_repo="${15}"
+    local yabridge_patches="${16}"
     local directory temporary clone_device clone_inode clone_identity index
     local -a root_environment=()
 
@@ -771,6 +811,8 @@ run_manifest_encode() {
         "RUN_MANIFEST_JSON_WINE_VERSION_STRING=$RUN_MANIFEST_WINE_VERSION_STRING" \
         "RUN_MANIFEST_JSON_YABRIDGE_REQUESTED_REF=$yabridge_ref" \
         "RUN_MANIFEST_JSON_YABRIDGE_COMMIT=$yabridge_commit" \
+        "RUN_MANIFEST_JSON_YABRIDGE_REPO=$yabridge_repo" \
+        "RUN_MANIFEST_JSON_YABRIDGE_PATCHES=$yabridge_patches" \
         "RUN_MANIFEST_JSON_YABRIDGE_HOME=$yabridge_home" \
         "RUN_MANIFEST_JSON_YABRIDGECTL_PATH=$yabridgectl" \
         "RUN_MANIFEST_JSON_BRIDGE_HOME=$bridge_home" \
@@ -833,6 +875,10 @@ document = {
     "wine_version_string": text("WINE_VERSION_STRING"),
     "yabridge_requested_ref": text("YABRIDGE_REQUESTED_REF"),
     "yabridge_commit": text("YABRIDGE_COMMIT"),
+    "yabridge_repo": text("YABRIDGE_REPO"),
+    "yabridge_patches": (
+        [] if text("YABRIDGE_PATCHES") == "none" else text("YABRIDGE_PATCHES").split("+")
+    ),
     "yabridge_home": text("YABRIDGE_HOME"),
     "yabridgectl_path": text("YABRIDGECTL_PATH"),
     "bridge_home": text("BRIDGE_HOME"),

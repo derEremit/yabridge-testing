@@ -164,6 +164,8 @@ class SessionScalars:
     wine_digest_verified: bool | None = None
     yabridge_commit: str | None = None
     yabridge_ref: str | None = None
+    yabridge_repo: str | None = None
+    yabridge_patches: tuple[str, ...] = ()
     host: str | None = None
 
 
@@ -189,12 +191,25 @@ def load_session_scalars(root: Path) -> SessionScalars | None:
     daw = raw.get("daw_executable")
     host = Path(daw).name if isinstance(daw, str) and daw else None
 
+    # A repository given as a local directory is a path on this machine; the
+    # report says only that it was local. URLs carry no home path.
+    repo = _optional_text(raw.get("yabridge_repo"))
+    if repo is not None and not re.match(r"^(https://|ssh://|git@)", repo):
+        repo = "local"
+    patches_raw = raw.get("yabridge_patches")
+    patches = tuple(
+        p for p in (patches_raw if isinstance(patches_raw, list) else [])
+        if isinstance(p, str) and re.fullmatch(r"[0-9a-f]{64}", p)
+    )
+
     return SessionScalars(
         wine_version=wine_version,
         wine_sha256=wine_sha256,
         wine_digest_verified=wine_digest_verified,
         yabridge_commit=document.get("yabridge_commit"),
         yabridge_ref=document.get("yabridge_requested_ref"),
+        yabridge_repo=repo,
+        yabridge_patches=patches,
         host=host,
     )
 

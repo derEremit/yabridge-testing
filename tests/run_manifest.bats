@@ -293,6 +293,7 @@ for key in (
     "wine_executable",
     "wine_version_string",
     "yabridge_requested_ref",
+    "yabridge_repo",
     "yabridge_home",
     "yabridgectl_path",
     "bridge_home",
@@ -302,6 +303,42 @@ for key in (
 assert isinstance(data["sandbox"]["bwrap"], str)
 PY
   [ "$status" -eq 0 ]
+}
+
+@test "run manifest records upstream and no patches when state predates those keys" {
+  load_run_manifest
+  stage_manifest_inputs "$MANIFEST_TREE"
+
+  write_manifest
+  [ "$status" -eq 0 ]
+
+  [ "$(manifest_text yabridge_repo)" = "https://github.com/robbert-vdh/yabridge.git" ]
+  [ "$(manifest_json yabridge_patches)" = "[]" ]
+}
+
+@test "run manifest records the repository and patch digests setup recorded" {
+  load_run_manifest
+  stage_manifest_inputs "$MANIFEST_TREE"
+  local one two
+  one="$(printf 'a%.0s' {1..64})"; two="$(printf 'b%.0s' {1..64})"
+  printf 'YABRIDGE_REPO=https://example.com/someone/yabridge.git\nYABRIDGE_PATCHES=%s+%s\n' \
+    "$one" "$two" >> "$MANIFEST_STATE"
+
+  write_manifest
+  [ "$status" -eq 0 ]
+
+  [ "$(manifest_text yabridge_repo)" = "https://example.com/someone/yabridge.git" ]
+  [ "$(manifest_json yabridge_patches)" = "$(printf '["%s", "%s"]' "$one" "$two")" ]
+}
+
+@test "run manifest refuses a malformed patch record rather than guessing" {
+  load_run_manifest
+  stage_manifest_inputs "$MANIFEST_TREE"
+  printf 'YABRIDGE_PATCHES=not-a-digest\n' >> "$MANIFEST_STATE"
+
+  write_manifest
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"malformed YABRIDGE_PATCHES"* ]]
 }
 
 @test "run manifest records the paths this run actually used" {

@@ -35,6 +35,10 @@ def build_session_report(
             updates["yabridge_commit"] = scalars.yabridge_commit
         if scalars.yabridge_ref:
             updates["yabridge_branch"] = scalars.yabridge_ref
+        if scalars.yabridge_repo:
+            updates["yabridge_repo"] = scalars.yabridge_repo
+        if scalars.yabridge_patches:
+            updates["yabridge_patches"] = list(scalars.yabridge_patches)
         if updates:
             env = env.model_copy(update=updates)
 

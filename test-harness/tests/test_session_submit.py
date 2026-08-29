@@ -98,3 +98,41 @@ def test_submit_session_dry_run_prints_sanitized_json(
     assert "bitwig-studio" in result.output
     assert "first click" in result.output
     assert VALID_COMMIT in result.output or VALID_REF in result.output
+
+
+def test_session_report_carries_repo_and_patch_digests_but_never_a_local_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    write_manifest(
+        tmp_path,
+        extra={
+            "yabridge_repo": "https://example.com/someone/yabridge.git",
+            "yabridge_patches": ["c" * 64, "d" * 64],
+            "daw_executable": f"{HOME}/isolation/bin/bitwig-studio",
+        },
+    )
+    monkeypatch.setenv("YABRIDGE_TEST_ROOT", str(tmp_path))
+    monkeypatch.setattr(
+        "yabridge_test.session_report.collect_environment", _environment
+    )
+
+    payload = payload_for_submit(build_session_report())
+
+    assert payload["report_version"] == "1.2.0"
+    assert payload["environment"]["yabridge_repo"] == "https://example.com/someone/yabridge.git"
+    assert payload["environment"]["yabridge_patches"] == ["c" * 64, "d" * 64]
+
+
+def test_a_local_repository_directory_is_reported_as_local(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    write_manifest(tmp_path, extra={"yabridge_repo": f"{HOME}/src/yabridge"})
+    monkeypatch.setenv("YABRIDGE_TEST_ROOT", str(tmp_path))
+    monkeypatch.setattr(
+        "yabridge_test.session_report.collect_environment", _environment
+    )
+
+    payload = payload_for_submit(build_session_report())
+
+    assert payload["environment"]["yabridge_repo"] == "local"
+    assert HOME not in str(payload)

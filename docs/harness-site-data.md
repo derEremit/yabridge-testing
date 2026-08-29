@@ -204,6 +204,11 @@ Bump `report_version` to `1.1.0`. Additive on the wire.
 - Add: `session_type`, `regression` (optional bool),
   `wine_prefix_kind`, optional `wine_prefix_hmac`,
   `wine_digest_verified`, `wine_sha256`.
+- 1.2.0 (2026-08-30): `environment.yabridge_repo` (git URL, or the
+  literal `local` when setup built from a directory — never the path)
+  and `environment.yabridge_patches` (SHA-256 of each patch applied,
+  in order; empty when unpatched). A fork or patched build is now
+  distinguishable from upstream in a published report.
 - Stop sending: `environment.wine_prefix`, `plugin.path`.
 - `submitter_contact` remains on the model, default omitted.
 

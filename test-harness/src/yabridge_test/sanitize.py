@@ -10,7 +10,7 @@ from typing import Any
 from .provenance import resolve_test_root
 from .schemas import TestReport
 
-REPORT_VERSION = "1.1.0"
+REPORT_VERSION = "1.2.0"
 
 SESSION_TYPES = frozenset({"probe", "suite", "plugin", "isolated-daw", "web-manual"})
 PREFIX_KINDS = frozenset({"temp-probe", "isolated", "clone", "production", "unknown"})
@@ -128,6 +128,10 @@ def payload_for_submit(report: TestReport) -> dict[str, Any]:
             prefix,
             test_root=resolve_test_root(os.environ),
         )
+    # A repository that is a directory is a path; say "local" and nothing else.
+    repo = environment.get("yabridge_repo")
+    if isinstance(repo, str) and not re.match(r"^(https://|ssh://|git@)", repo):
+        environment["yabridge_repo"] = "local"
     payload["environment"] = _redact_value(environment)
 
     plugin = payload.get("plugin")

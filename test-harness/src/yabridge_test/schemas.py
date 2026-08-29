@@ -94,6 +94,14 @@ class Environment(BaseModel):
     yabridge_version: str = Field(description="Yabridge version")
     yabridge_commit: str | None = Field(default=None, description="Git commit hash")
     yabridge_branch: str | None = Field(default=None, description="Git branch")
+    yabridge_repo: str | None = Field(
+        default=None,
+        description="Git repository the build came from (URL, or 'local' for a directory)",
+    )
+    yabridge_patches: list[str] = Field(
+        default_factory=list,
+        description="SHA-256 of each patch applied on top of the commit, in order",
+    )
 
     # Display
     dpi_scale: float = Field(default=1.0, description="DPI scaling factor")
