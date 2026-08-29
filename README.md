@@ -1,14 +1,16 @@
 # yabridge-testing
 
-Test **yabridge git master** against a **pinned, digest-verified Wine build**
-without touching the yabridge, Wine, prefixes, or plugins you use every day.
-Report what you find to <https://yabridge-tests.fly.dev> — and nothing is
-published until you read the report and click Publish yourself.
+Test **any yabridge build** — git master, a branch, a commit, a patched fork —
+against a **Wine release you name and verify by digest**, without touching the
+yabridge, Wine, prefixes, or plugins you use every day. Report what you find
+to <https://yabridge-tests.fly.dev>; nothing is published until you read the
+report and click Publish yourself.
 
-yabridge 5.1.1 stable stops at Wine 9.21. Git master has the fixes for Wine
-10+, but testing it normally means replacing the stack you work with. This
-repository builds the new stack in a directory of its own, runs your real DAW
-against a throwaway copy of your real prefix, and records exactly what ran.
+yabridge 5.1.1 stable stops at Wine 9.21. The fixes for Wine 10+ live in git
+and in proposed patches, and trying them normally means replacing the stack
+you work with. This repository builds the stack under test in a directory of
+its own, runs your real DAW against a throwaway copy of your real prefix, and
+records exactly what ran.
 
 ## What it never touches
 
@@ -43,8 +45,8 @@ verified elsewhere. Do not take it from the download you are about to run.
 ```
 
 Setup installs build dependencies (pacman-based distros; others get a list),
-downloads and verifies Wine into `build/wine/`, clones and builds yabridge
-master into `build/yabridge/`, creates `test-harness/.venv`, generates
+downloads and verifies Wine into `build/wine/`, clones and builds the
+yabridge ref you asked for (master by default) into `build/yabridge/`, creates `test-harness/.venv`, generates
 `env.sh` / `test.sh`, and initialises an empty prefix at `prefix/`. Success is
 recorded as `WINE_SHA256_VERIFIED=true` in `build/component-state.env`; a
 launch requires that record and re-verifies rather than trusting a bare hash.
@@ -52,7 +54,7 @@ launch requires that record and re-verifies rather than trusting a bare hash.
 ```bash
 ./setup.sh --no-wine                                       # rebuild yabridge from latest master
 ./setup.sh --no-yabridge --wine-version 11.17 --wine-sha256 <digest>   # move Wine
-./setup.sh --yabridge-branch <ref> --no-wine               # a specific branch or commit
+./setup.sh --yabridge-branch <ref> --no-wine               # a branch, tag, commit, or PR head to test
 ```
 
 Requirements: `gcc >= 10`, `meson`, `ninja`, `wine` + `winegcc`, `libxcb`;
