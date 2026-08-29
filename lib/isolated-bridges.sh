@@ -452,7 +452,7 @@ generate_isolated_bridges() {
     local yabridge_canonical="$6"
     local active_status="$7"
     local candidate_home="$candidate/home"
-    local relative
+    local relative add_root
 
     if [[ -L "$root" || ! -d "$root" ]]; then
         isolated_bridges_error "project root is not a usable directory: $root"
@@ -492,13 +492,14 @@ generate_isolated_bridges() {
         cleanup_owned_bridge_candidate
         return 1
     fi
-    if [[ "${#ISOLATED_PLUGIN_ADD_ROOTS[@]}" -gt 0 ]] &&
-        ! run_isolated_yabridgectl "$candidate_home" "$yabridgectl" \
-            add "${ISOLATED_PLUGIN_ADD_ROOTS[@]}"; then
-        isolated_bridges_error "could not add isolated plugin directories to yabridgectl"
-        cleanup_owned_bridge_candidate
-        return 1
-    fi
+    for add_root in ${ISOLATED_PLUGIN_ADD_ROOTS[@]+"${ISOLATED_PLUGIN_ADD_ROOTS[@]}"}; do
+        if ! run_isolated_yabridgectl "$candidate_home" "$yabridgectl" \
+            add "$add_root"; then
+            isolated_bridges_error "could not add isolated plugin directories to yabridgectl"
+            cleanup_owned_bridge_candidate
+            return 1
+        fi
+    done
     if ! run_isolated_yabridgectl "$candidate_home" "$yabridgectl" \
         sync --force --prune; then
         isolated_bridges_error "isolated yabridgectl sync failed for $copy_canonical"
@@ -686,9 +687,11 @@ validate_native_plugin_path() {
     fi
 }
 
-# The DAW only ever sees the isolated bridge roots plus the native directories
-# the user asked for by name; inherited production values are discarded. The
-# bridge home comes from the validated preparation run, never from an argument.
+# The DAW is handed the production plugin path strings Bitwig already
+# indexed. Isolated generation still writes under isolation/home; the sandbox
+# overlays those trees over ~/.vst/yabridge, ~/.vst3/yabridge and
+# ~/.clap/yabridge. Inherited production values are discarded. The bridge
+# home comes from the validated preparation run, never from an argument.
 export_isolated_plugin_paths() {
     local home="$ISOLATED_BRIDGE_HOME"
     local native vst2 vst3 clap
@@ -697,9 +700,9 @@ export_isolated_plugin_paths() {
         isolated_bridges_error "isolated bridge home is unknown; refusing to expose plugin paths"
         return 1
     fi
-    vst2="$home/.vst/yabridge"
-    vst3="$home/.vst3/yabridge"
-    clap="$home/.clap/yabridge"
+    vst2="$HOME/.vst/yabridge"
+    vst3="$HOME/.vst3/yabridge"
+    clap="$HOME/.clap/yabridge"
     for native in "$@"; do
         vst2+=":$native"
         vst3+=":$native"

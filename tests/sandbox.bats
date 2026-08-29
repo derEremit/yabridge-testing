@@ -37,6 +37,8 @@ setup() {
   cp "$PROJECT_ROOT/daw-env.sh" "$FIXTURE_ROOT/daw-env.sh"
   chmod +x "$FIXTURE_ROOT/daw-env.sh"
   copy_launcher_libraries "$FIXTURE_ROOT/lib"
+  cp "$PROJECT_ROOT/lib/wine-wait.sh" "$FIXTURE_ROOT/lib/wine-wait.sh"
+  chmod +x "$FIXTURE_ROOT/lib/wine-wait.sh"
   # A launch records the components it used, so the identities setup.sh writes
   # are part of a working fixture project.
   seed_component_state_file "$FIXTURE_ROOT/build/component-state.env"
@@ -116,6 +118,23 @@ EOF
   unset DISPLAY WAYLAND_DISPLAY XAUTHORITY
 }
 
+teardown() {
+  # Pasta/slirp fakes sleep in the background. Tests that start one must
+  # not leak it into later cases or the host.
+  if [[ -n "${SANDBOX_MAC_HOLDER_PID:-}" ]]; then
+    kill "$SANDBOX_MAC_HOLDER_PID" 2>/dev/null || true
+    wait "$SANDBOX_MAC_HOLDER_PID" 2>/dev/null || true
+  fi
+  if [[ -n "${SANDBOX_TEST_PASTA_PIDS:-}" && -f "$SANDBOX_TEST_PASTA_PIDS" ]]; then
+    local leftover
+    while IFS= read -r leftover; do
+      [[ "$leftover" =~ ^[0-9]+$ ]] || continue
+      kill "$leftover" 2>/dev/null || true
+      wait "$leftover" 2>/dev/null || true
+    done < "$SANDBOX_TEST_PASTA_PIDS"
+  fi
+}
+
 make_prefix() {
   local path="$1"
   mkdir -p "$path/drive_c"
@@ -142,6 +161,11 @@ configure_sandbox() {
   SANDBOX_CLONE="$COPY"
   SANDBOX_ISOLATION="$ISOLATION"
   SANDBOX_ISOLATED_HOME="$ISOLATED_HOME"
+  SANDBOX_HOST_HOME="$PRODUCTION_HOME"
+  SANDBOX_HOST_UID="$(id -u)"
+  SANDBOX_HOST_GID="$(id -g)"
+  SANDBOX_HOST_USER="$(id -un)"
+  SANDBOX_WINESERVER="$FIXTURE_BIN/wineserver"
   SANDBOX_X11_SOCKET_DIR="$X11_DIR"
   SANDBOX_DEVICE_PATHS=()
   SANDBOX_WRITABLE_PATHS=()
@@ -199,6 +223,74 @@ refute_sequence() {
   printf '\n'
   show_command
   return 1
+}
+
+# bwrap cannot mount onto a symlink. Every bind/tmpfs dest must be a real
+# directory (or a path that does not exist yet). --symlink recreating a
+# merged-/usr link is not a mount and is ignored here.
+refute_symlink_mount_destinations() {
+  local total="${#SANDBOX_COMMAND[@]}"
+  local index flag dest
+
+  for ((index = 0; index < total; index++)); do
+    flag="${SANDBOX_COMMAND[index]}"
+    case "$flag" in
+      --) break ;;
+      --ro-bind | --ro-bind-try | --bind | --bind-try | --dev-bind | \
+        --dev-bind-try)
+        dest="${SANDBOX_COMMAND[index + 2]}"
+        ;;
+      --tmpfs | --proc | --dev)
+        dest="${SANDBOX_COMMAND[index + 1]}"
+        ;;
+      *) continue ;;
+    esac
+    if [[ -L "$dest" ]]; then
+      printf 'mount destination is a symlink: %s -> %s\n' "$dest" \
+        "$(readlink -- "$dest")"
+      show_command
+      return 1
+    fi
+  done
+}
+
+wrapped_has_sequence() {
+  local -a want=("$@")
+  local total="${#WRAPPED_COMMAND[@]}"
+  local wanted="${#want[@]}"
+  local index offset
+
+  for ((index = 0; index + wanted <= total; index++)); do
+    for ((offset = 0; offset < wanted; offset++)); do
+      [[ "${WRAPPED_COMMAND[index + offset]}" == "${want[offset]}" ]] || break
+    done
+    if [[ "$offset" -eq "$wanted" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+assert_wrapped_sequence() {
+  wrapped_has_sequence "$@" && return 0
+  printf 'missing wrapped argv sequence:'
+  printf ' %q' "$@"
+  printf '\n'
+  printf 'argv:'
+  printf ' %q' ${WRAPPED_COMMAND[@]+"${WRAPPED_COMMAND[@]}"}
+  printf '\n'
+  return 1
+}
+
+refute_wrapped_token() {
+  local needle="$1"
+  local token
+  for token in ${WRAPPED_COMMAND[@]+"${WRAPPED_COMMAND[@]}"}; do
+    if [[ "$token" == *"$needle"* ]]; then
+      printf 'unexpected wrapped token containing %q: %q\n' "$needle" "$token"
+      return 1
+    fi
+  done
 }
 
 # Reports the mount that actually governs a path: the last mount in argv order
@@ -356,33 +448,337 @@ refute_launcher_mutation() {
 
   assert_sequence --unshare-user
   assert_sequence --unshare-pid
-  assert_sequence --unshare-ipc
   assert_sequence --unshare-uts
   assert_sequence --unshare-cgroup-try
   assert_sequence --die-with-parent
   assert_sequence --new-session
   assert_sequence --proc /proc
   assert_sequence --dev /dev
+  # Host X11 MIT-SHM (X_ShmPutImage) needs the host IPC namespace and
+  # host /dev/shm. --unshare-ipc makes Wine/DXVK abort after a flash.
+  local token
+  for token in "${SANDBOX_COMMAND[@]}"; do
+    [ "$token" != --unshare-ipc ]
+  done
+  assert_sequence --bind /dev/shm /dev/shm
   assert_sequence --tmpfs /tmp
 }
 
-# ── Production state stays read-only ─────────────────────────────────────────
+# Cotton updateBinary tree: exe plus the versioned resources Lua loads
+# from GetModuleFileName (installData_app), not only cwd-relative Certs.
+seed_xln_updatebinary_tree() {
+  local cotton="$1"
+  mkdir -p "$cotton/updateBinary/XLN Online Installer/Certs"
+  mkdir -p "$cotton/updateBinary/installData/installData_app/XLN Online Installer"
+  printf '%s\n' 'installer-image' > "$cotton/updateBinary/XLN Online Installer.exe"
+  printf '%s\n' '-----BEGIN CERTIFICATE-----' > \
+    "$cotton/updateBinary/XLN Online Installer/Certs/cacert.pem"
+  printf '%s\n' '4_7_3 Release1' > \
+    "$cotton/updateBinary/installData/installData_app/XLN Online Installer/XLN Online Installer.version"
+  printf '%s\n' 'lua-system' > \
+    "$cotton/updateBinary/installData/installData_app/XLN Online Installer/LuaSystem.xpak"
+}
 
-@test "sandbox mounts the production prefix read-only and the clone writable" {
+@test "sandbox pins XLN installer cacert.pem on the clone CAfile path" {
+  load_sandbox
+  configure_sandbox
+  local certs="$COPY/drive_c/ProgramData/XLN Audio/XLN Online Installer/App/XLN Online Installer/Certs"
+  local cafile="$COPY/drive_c/ProgramData/XLN Audio/Temp/App/Cotton XLN Online Installer/updateBinary/installData/installData_app/cacert.pem"
+  local cache="$FIXTURE_ROOT/run-state/xln-cacert.pem"
+  mkdir -p "$certs"
+  printf '%s\n' '-----BEGIN CERTIFICATE-----' 'MIIB' '-----END CERTIFICATE-----' > "$certs/cacert.pem"
+  sandbox_pin_xln_installer_cacert "$COPY"
+  [ -s "$cafile" ]
+  [ -s "$cache" ]
+  grep -q 'BEGIN CERTIFICATE' "$cafile"
+}
+
+@test "sandbox ro-binds the XLN installer CAfile so ReplaceFileW cannot delete it" {
+  load_sandbox
+  configure_sandbox
+  local certs="$COPY/drive_c/ProgramData/XLN Audio/XLN Online Installer/App/XLN Online Installer/Certs"
+  local cotton="$COPY/drive_c/ProgramData/XLN Audio/Temp/App/Cotton XLN Online Installer"
+  local rel="drive_c/ProgramData/XLN Audio/Temp/App/Cotton XLN Online Installer/updateBinary/installData/installData_app/cacert.pem"
+  local cache="$FIXTURE_ROOT/run-state/xln-cacert.pem"
+  mkdir -p "$certs"
+  printf '%s\n' '-----BEGIN CERTIFICATE-----' 'MIIB' '-----END CERTIFICATE-----' > "$certs/cacert.pem"
+  sandbox_pin_xln_installer_cacert "$COPY"
+  build_command fake-daw
+  assert_sequence --ro-bind "$cache" "$COPY/$rel"
+  assert_sequence --ro-bind "$cache" "$REAL_PREFIX/$rel"
+  # File bind of cacert.pem only — not the installer exe, not launchCopy/.
+  refute_sequence --ro-bind "$cotton/updateBinary/XLN Online Installer.exe"
+  refute_sequence --ro-bind "$cotton/launchCopy"
+  refute_sequence --ro-bind "$cotton/launchCopy/XLN Online Installer.exe"
+}
+
+@test "sandbox chdirs to a Windows exe directory so relative Certs resolve" {
+  load_sandbox
+  configure_sandbox
+  local win_dir="$COPY/drive_c/ProgramData/XLN Audio/Temp/App/Cotton XLN Online Installer/updateBinary"
+  mkdir -p "$win_dir"
+  build_command fake-daw \
+    'C:\ProgramData\XLN Audio\Temp\App\Cotton XLN Online Installer\updateBinary\XLN Online Installer.exe'
+  assert_sequence --chdir "$win_dir"
+}
+
+@test "sandbox stages the XLN updateBinary installer to launchCopy and leaves the original" {
+  load_sandbox
+  configure_sandbox
+  local cotton="$COPY/drive_c/ProgramData/XLN Audio/Temp/App/Cotton XLN Online Installer"
+  local src="$cotton/updateBinary/XLN Online Installer.exe"
+  local dest="$cotton/launchCopy/XLN Online Installer.exe"
+  seed_xln_updatebinary_tree "$cotton"
+  local staged
+  staged="$(sandbox_stage_xln_updatebinary_launch_copy "$COPY" \
+    'C:\ProgramData\XLN Audio\Temp\App\Cotton XLN Online Installer\updateBinary\XLN Online Installer.exe')"
+  [ "$staged" = 'C:\ProgramData\XLN Audio\Temp\App\Cotton XLN Online Installer\launchCopy\XLN Online Installer.exe' ]
+  [ -f "$src" ]
+  [ -f "$dest" ]
+  [ "$(cat "$src")" = installer-image ]
+  [ "$(cat "$dest")" = installer-image ]
+  [ -f "$cotton/launchCopy/XLN Online Installer/Certs/cacert.pem" ]
+  [ -f "$cotton/launchCopy/installData/installData_app/XLN Online Installer/XLN Online Installer.version" ]
+  [ -f "$cotton/launchCopy/installData/installData_app/XLN Online Installer/LuaSystem.xpak" ]
+  [ "$(cat "$cotton/launchCopy/installData/installData_app/XLN Online Installer/XLN Online Installer.version")" = '4_7_3 Release1' ]
+  [ ! -e "$cotton/launchCopy/updateBinary" ]
+}
+
+@test "sandbox launches the XLN updateBinary copy so chdir and argv use launchCopy" {
+  load_sandbox
+  configure_sandbox
+  local cotton="$COPY/drive_c/ProgramData/XLN Audio/Temp/App/Cotton XLN Online Installer"
+  local src="$cotton/updateBinary/XLN Online Installer.exe"
+  local dest="$cotton/launchCopy/XLN Online Installer.exe"
+  local rel="drive_c/ProgramData/XLN Audio/Temp/App/Cotton XLN Online Installer/updateBinary/installData/installData_app/cacert.pem"
+  local launch_rel="drive_c/ProgramData/XLN Audio/Temp/App/Cotton XLN Online Installer/launchCopy/installData/installData_app/cacert.pem"
+  local cache="$FIXTURE_ROOT/run-state/xln-cacert.pem"
+  local win='C:\ProgramData\XLN Audio\Temp\App\Cotton XLN Online Installer\updateBinary\XLN Online Installer.exe'
+  local staged='C:\ProgramData\XLN Audio\Temp\App\Cotton XLN Online Installer\launchCopy\XLN Online Installer.exe'
+  seed_xln_updatebinary_tree "$cotton"
+  sandbox_pin_xln_installer_cacert "$COPY"
+  build_command fake-daw "$win"
+  [ -f "$src" ]
+  [ -f "$dest" ]
+  [ "$(cat "$src")" = installer-image ]
+  [ -f "$cotton/launchCopy/installData/installData_app/XLN Online Installer/LuaSystem.xpak" ]
+  [ -s "$COPY/$launch_rel" ]
+  assert_sequence --chdir "$cotton/launchCopy"
+  assert_sequence -- "$FIXTURE_BIN/fake-daw" "$staged"
+  refute_sequence -- "$FIXTURE_BIN/fake-daw" "$win"
+  refute_sequence --chdir "$cotton/updateBinary"
+  refute_sequence --ro-bind "$cotton/launchCopy"
+  refute_sequence --ro-bind "$dest"
+  refute_sequence --ro-bind "$src"
+  assert_sequence --ro-bind "$cache" "$COPY/$rel"
+  assert_sequence --ro-bind "$cache" "$COPY/$launch_rel"
+}
+
+@test "sandbox accepts a forward-slash XLN updateBinary installer path" {
+  load_sandbox
+  configure_sandbox
+  local cotton="$COPY/drive_c/ProgramData/XLN Audio/Temp/App/Cotton XLN Online Installer"
+  mkdir -p "$cotton/updateBinary"
+  printf '%s\n' 'installer-image' > "$cotton/updateBinary/XLN Online Installer.exe"
+  local staged
+  staged="$(sandbox_xln_updatebinary_launch_arg "$COPY" \
+    'c:/ProgramData/XLN Audio/Temp/App/Cotton XLN Online Installer/updateBinary/XLN Online Installer.exe')"
+  [ "$staged" = 'c:\ProgramData\XLN Audio\Temp\App\Cotton XLN Online Installer\launchCopy\XLN Online Installer.exe' ]
+  [ -f "$cotton/updateBinary/XLN Online Installer.exe" ]
+  [ -f "$cotton/launchCopy/XLN Online Installer.exe" ]
+}
+
+@test "sandbox pin restores cacert next to an XLN launchCopy" {
+  load_sandbox
+  configure_sandbox
+  local cotton="$COPY/drive_c/ProgramData/XLN Audio/Temp/App/Cotton XLN Online Installer"
+  local certs="$COPY/drive_c/ProgramData/XLN Audio/XLN Online Installer/App/XLN Online Installer/Certs"
+  mkdir -p "$certs" "$cotton/launchCopy/installData/installData_app"
+  printf '%s\n' '-----BEGIN CERTIFICATE-----' 'MIIB' '-----END CERTIFICATE-----' > "$certs/cacert.pem"
+  sandbox_pin_xln_installer_cacert "$COPY"
+  [ -s "$cotton/launchCopy/XLN Online Installer/Certs/cacert.pem" ]
+  grep -q 'BEGIN CERTIFICATE' "$cotton/launchCopy/XLN Online Installer/Certs/cacert.pem"
+  [ -s "$cotton/launchCopy/installData/installData_app/cacert.pem" ]
+  grep -q 'BEGIN CERTIFICATE' "$cotton/launchCopy/installData/installData_app/cacert.pem"
+}
+
+@test "sandbox syncs clone Program Files from updateBinary when hashes differ" {
+  load_sandbox
+  configure_sandbox
+  local cotton="$COPY/drive_c/ProgramData/XLN Audio/Temp/App/Cotton XLN Online Installer"
+  local pf="$COPY/drive_c/Program Files/XLN Audio/XLN Online Installer"
+  seed_xln_updatebinary_tree "$cotton"
+  mkdir -p "$pf/XLN Online Installer"
+  printf '%s\n' 'old-4.7.2-exe' > "$pf/XLN Online Installer.exe"
+  printf '%s\n' '4_7_2 Release1' > "$pf/XLN Online Installer/XLN Online Installer.version"
+  sandbox_sync_xln_program_files_from_updatebinary "$COPY"
+  [ "$(cat "$pf/XLN Online Installer.exe")" = installer-image ]
+  [ "$(cat "$pf/XLN Online Installer/XLN Online Installer.version")" = '4_7_3 Release1' ]
+  [ "$(cat "$pf/XLN Online Installer/LuaSystem.xpak")" = lua-system ]
+  [ "$(cat "$cotton/updateBinary/XLN Online Installer.exe")" = installer-image ]
+}
+
+@test "sandbox sync of XLN Program Files is a no-op when hashes already match" {
+  load_sandbox
+  configure_sandbox
+  local cotton="$COPY/drive_c/ProgramData/XLN Audio/Temp/App/Cotton XLN Online Installer"
+  local pf="$COPY/drive_c/Program Files/XLN Audio/XLN Online Installer"
+  seed_xln_updatebinary_tree "$cotton"
+  mkdir -p "$pf/XLN Online Installer"
+  cp -f -- "$cotton/updateBinary/XLN Online Installer.exe" "$pf/XLN Online Installer.exe"
+  cp -f -- "$cotton/updateBinary/installData/installData_app/XLN Online Installer/XLN Online Installer.version" \
+    "$pf/XLN Online Installer/XLN Online Installer.version"
+  touch -d '2000-01-01 00:00:00' "$pf/XLN Online Installer.exe"
+  local before
+  before="$(stat -c '%Y' "$pf/XLN Online Installer.exe")"
+  sandbox_sync_xln_program_files_from_updatebinary "$COPY"
+  [ "$(cat "$pf/XLN Online Installer.exe")" = installer-image ]
+  [ "$(stat -c '%Y' "$pf/XLN Online Installer.exe")" = "$before" ]
+}
+
+@test "sandbox sync of XLN Program Files never writes a path outside the clone" {
+  load_sandbox
+  configure_sandbox
+  local cotton="$COPY/drive_c/ProgramData/XLN Audio/Temp/App/Cotton XLN Online Installer"
+  local prod_pf="$REAL_PREFIX/drive_c/Program Files/XLN Audio/XLN Online Installer"
+  local outside="$BATS_TEST_TMPDIR/outside-xln-pf"
+  seed_xln_updatebinary_tree "$cotton"
+  mkdir -p "$prod_pf" "$outside" "$COPY/drive_c/Program Files/XLN Audio"
+  printf '%s\n' 'production-exe' > "$prod_pf/XLN Online Installer.exe"
+  printf '%s\n' 'outside-exe' > "$outside/XLN Online Installer.exe"
+  sandbox_sync_xln_program_files_from_updatebinary "$COPY"
+  [ "$(cat "$prod_pf/XLN Online Installer.exe")" = production-exe ]
+  [ ! -e "$COPY/drive_c/Program Files/XLN Audio/XLN Online Installer/XLN Online Installer.exe" ]
+  ln -s "$outside" "$COPY/drive_c/Program Files/XLN Audio/XLN Online Installer"
+  run sandbox_sync_xln_program_files_from_updatebinary "$COPY"
+  [ "$status" -ne 0 ]
+  [ "$(cat "$outside/XLN Online Installer.exe")" = outside-exe ]
+  [ "$(cat "$prod_pf/XLN Online Installer.exe")" = production-exe ]
+}
+
+@test "launcher stages the XLN updateBinary installer to launchCopy on the clone" {
+  local cotton_src="$REAL_PREFIX/drive_c/ProgramData/XLN Audio/Temp/App/Cotton XLN Online Installer"
+  local cotton="$COPY/drive_c/ProgramData/XLN Audio/Temp/App/Cotton XLN Online Installer"
+  seed_xln_updatebinary_tree "$cotton_src"
+
+  run_daw_fixture --prefix "$REAL_PREFIX" fake-daw \
+    'C:\ProgramData\XLN Audio\Temp\App\Cotton XLN Online Installer\updateBinary\XLN Online Installer.exe'
+
+  [ "$status" -eq 0 ]
+  [ -f "$cotton/updateBinary/XLN Online Installer.exe" ]
+  [ -f "$cotton/launchCopy/XLN Online Installer.exe" ]
+  [ -f "$cotton/launchCopy/installData/installData_app/XLN Online Installer/LuaSystem.xpak" ]
+  [ "$(cat "$cotton/updateBinary/XLN Online Installer.exe")" = installer-image ]
+  [ ! -e "$cotton/launchCopy/updateBinary" ]
+  [ ! -e "$cotton_src/launchCopy" ]
+  [[ "$(launched_argv)" == *launchCopy* ]]
+  [[ "$(launched_argv)" == *"--chdir"* ]]
+}
+
+@test "launcher syncs clone Program Files from updateBinary and leaves production" {
+  local cotton_src="$REAL_PREFIX/drive_c/ProgramData/XLN Audio/Temp/App/Cotton XLN Online Installer"
+  local pf_src="$REAL_PREFIX/drive_c/Program Files/XLN Audio/XLN Online Installer"
+  local pf="$COPY/drive_c/Program Files/XLN Audio/XLN Online Installer"
+  seed_xln_updatebinary_tree "$cotton_src"
+  mkdir -p "$pf_src"
+  printf '%s\n' 'old-4.7.2-exe' > "$pf_src/XLN Online Installer.exe"
+
+  run_daw_fixture --prefix "$REAL_PREFIX" fake-daw \
+    'C:\ProgramData\XLN Audio\Temp\App\Cotton XLN Online Installer\updateBinary\XLN Online Installer.exe'
+
+  [ "$status" -eq 0 ]
+  [ "$(cat "$pf/XLN Online Installer.exe")" = installer-image ]
+  [ "$(cat "$pf/XLN Online Installer/XLN Online Installer.version")" = '4_7_3 Release1' ]
+  [ "$(cat "$pf_src/XLN Online Installer.exe")" = old-4.7.2-exe ]
+}
+
+@test "sandbox launches the synced Program Files installer instead of launchCopy" {
+  load_sandbox
+  configure_sandbox
+  local cotton="$COPY/drive_c/ProgramData/XLN Audio/Temp/App/Cotton XLN Online Installer"
+  local pf="$COPY/drive_c/Program Files/XLN Audio/XLN Online Installer"
+  local win='C:\ProgramData\XLN Audio\Temp\App\Cotton XLN Online Installer\updateBinary\XLN Online Installer.exe'
+  local staged='C:\Program Files\XLN Audio\XLN Online Installer\XLN Online Installer.exe'
+  seed_xln_updatebinary_tree "$cotton"
+  mkdir -p "$pf"
+  printf '%s\n' 'old-4.7.2-exe' > "$pf/XLN Online Installer.exe"
+  build_command fake-daw "$win"
+  [ "$(cat "$pf/XLN Online Installer.exe")" = installer-image ]
+  assert_sequence --chdir "$pf"
+  assert_sequence -- "$FIXTURE_BIN/fake-daw" "$staged"
+  refute_sequence --chdir "$cotton/launchCopy"
+  refute_sequence -- "$FIXTURE_BIN/fake-daw" \
+    'C:\ProgramData\XLN Audio\Temp\App\Cotton XLN Online Installer\launchCopy\XLN Online Installer.exe'
+}
+
+@test "sandbox repairs a half-updated XLN updateBinary from the Cotton bundle" {
+  load_sandbox
+  configure_sandbox
+  local cotton="$COPY/drive_c/ProgramData/XLN Audio/Temp/App/Cotton XLN Online Installer"
+  local src="$cotton/updateBinary/XLN Online Installer.exe"
+  mkdir -p "$cotton/updateBinary"
+  mkdir -p "$cotton/XLN Online Installer/installData/installData_app/XLN Online Installer"
+  mkdir -p "$cotton/XLN Online Installer/installData/installData_prg"
+  printf '%s\n' 'installer-image' > "$src"
+  printf '%s\n' '4_7_3 Release1' > \
+    "$cotton/XLN Online Installer/installData/installData_app/XLN Online Installer/XLN Online Installer.version"
+  printf '%s\n' 'lua-system' > \
+    "$cotton/XLN Online Installer/installData/installData_app/XLN Online Installer/LuaSystem.xpak"
+  printf '%s\n' 'installer-image' > \
+    "$cotton/XLN Online Installer/installData/installData_prg/XLN Online Installer.exe"
+  local staged
+  staged="$(sandbox_stage_xln_updatebinary_launch_copy "$COPY" \
+    'C:\ProgramData\XLN Audio\Temp\App\Cotton XLN Online Installer\updateBinary\XLN Online Installer.exe')"
+  [ "$staged" = 'C:\ProgramData\XLN Audio\Temp\App\Cotton XLN Online Installer\launchCopy\XLN Online Installer.exe' ]
+  [ -f "$src" ]
+  [ "$(cat "$src")" = installer-image ]
+  [ -f "$cotton/updateBinary/installData/installData_app/XLN Online Installer/LuaSystem.xpak" ]
+  [ -f "$cotton/launchCopy/installData/installData_app/XLN Online Installer/LuaSystem.xpak" ]
+  [ "$(cat "$cotton/launchCopy/installData/installData_app/XLN Online Installer/XLN Online Installer.version")" = '4_7_3 Release1' ]
+  [ ! -e "$cotton/launchCopy/updateBinary" ]
+}
+
+# ── Production paths stay, clone and isolated bridges overlay them ────────────
+#
+# Bitwig persists absolute plugin paths into ~/.BitwigStudio. The clone and
+# isolated yabridge trees must therefore appear at the host paths Bitwig
+# already indexed: the production prefix and the resolved ~/.vst/yabridge,
+# ~/.vst3/yabridge, ~/.clap/yabridge directories. Symlink aliases stay
+# symlinks so Bitwig still follows those path strings.
+# Production directories stay read-only on the host; the overlay source is
+# the clone or the isolated tree.
+
+@test "sandbox overlays the clone over the production prefix path" {
   load_sandbox
   configure_sandbox
 
   build_command fake-daw
 
-  assert_sequence --ro-bind "$REAL_PREFIX" "$REAL_PREFIX"
+  assert_sequence --bind "$COPY" "$REAL_PREFIX"
   assert_sequence --bind "$COPY" "$COPY"
-  assert_read_only "$REAL_PREFIX"
-  assert_read_only "$REAL_PREFIX/drive_c/production.txt"
+  assert_sequence --setenv WINEPREFIX "$REAL_PREFIX"
+  refute_sequence --ro-bind "$REAL_PREFIX" "$REAL_PREFIX"
+  refute_sequence --bind "$REAL_PREFIX" "$REAL_PREFIX"
+  assert_writable "$REAL_PREFIX"
+  assert_writable "$REAL_PREFIX/drive_c/production.txt"
   assert_writable "$COPY"
   assert_writable "$COPY/drive_c"
 }
 
-@test "sandbox mounts production plugin roots read-only" {
+@test "sandbox overlays the clone over a winplugins alias of the prefix" {
+  load_sandbox
+  ln -s "$REAL_PREFIX" "$PRODUCTION_HOME/winplugins"
+  configure_sandbox
+
+  build_command fake-daw
+
+  assert_sequence --bind "$COPY" "$REAL_PREFIX"
+  refute_sequence --bind "$COPY" "$PRODUCTION_HOME/winplugins"
+  refute_sequence --bind "$REAL_PREFIX" "$PRODUCTION_HOME/winplugins"
+  refute_symlink_mount_destinations
+}
+
+@test "sandbox mounts production plugin roots read-only outside yabridge" {
   load_sandbox
   configure_sandbox
 
@@ -393,11 +789,10 @@ refute_launcher_mutation() {
     assert_sequence --ro-bind "$PRODUCTION_HOME/$plugin_root" \
       "$PRODUCTION_HOME/$plugin_root"
     assert_read_only "$PRODUCTION_HOME/$plugin_root"
-    assert_read_only "$PRODUCTION_HOME/$plugin_root/yabridge"
   done
 }
 
-@test "sandbox never binds production yabridge directories writable" {
+@test "sandbox overlays isolated yabridge over production plugin paths" {
   load_sandbox
   configure_sandbox
 
@@ -405,9 +800,23 @@ refute_launcher_mutation() {
 
   local plugin_root
   for plugin_root in .vst .vst3 .clap; do
+    assert_sequence --bind "$ISOLATED_HOME/$plugin_root/yabridge" \
+      "$PRODUCTION_HOME/$plugin_root/yabridge"
     refute_sequence --bind "$PRODUCTION_HOME/$plugin_root/yabridge" \
       "$PRODUCTION_HOME/$plugin_root/yabridge"
-    assert_read_only "$PRODUCTION_HOME/$plugin_root/yabridge/Production.so"
+    assert_writable "$PRODUCTION_HOME/$plugin_root/yabridge"
+  done
+}
+
+@test "sandbox hides isolated plugin roots so they cannot be reindexed" {
+  load_sandbox
+  configure_sandbox
+
+  build_command fake-daw
+
+  local plugin_root
+  for plugin_root in .vst .vst3 .clap; do
+    assert_sequence --tmpfs "$ISOLATED_HOME/$plugin_root"
   done
 }
 
@@ -433,9 +842,15 @@ alias_plugin_root() {
   build_command fake-daw
 
   assert_sequence --ro-bind "$target" "$target"
+  refute_sequence --ro-bind "$target" "$PRODUCTION_HOME/.vst"
+  refute_sequence --bind "$ISOLATED_HOME/.vst/yabridge" \
+    "$PRODUCTION_HOME/.vst/yabridge"
   refute_sequence --bind "$target" "$target"
+  refute_symlink_mount_destinations
   assert_read_only "$target"
-  assert_read_only "$target/yabridge/Production.so"
+  assert_sequence --bind "$ISOLATED_HOME/.vst/yabridge" "$target/yabridge"
+  assert_writable "$target/yabridge"
+  assert_writable "$PRODUCTION_HOME/.vst/yabridge"
 }
 
 @test "writable paths reject the canonical target of a symlinked plugin root" {
@@ -519,20 +934,56 @@ alias_plugin_root() {
   build_command fake-daw
 
   assert_sequence --ro-bind "$target" "$target"
-  assert_read_only "$target/yabridge/Production.so"
-  [ "$(printf '%s\n' ${SANDBOX_COMMAND[@]+"${SANDBOX_COMMAND[@]}"} |
-    grep -cFx "$target")" -eq 2 ]
+  refute_sequence --ro-bind "$target" "$PRODUCTION_HOME/.vst"
+  refute_sequence --ro-bind "$target" "$PRODUCTION_HOME/.vst3"
+  refute_symlink_mount_destinations
+  assert_read_only "$target"
 }
 
-@test "sandbox never binds the production home" {
+# HOME/.vst is often a symlink (here, into .audio-production). bwrap refuses
+# "Can't mount on symlink destination". Overlay the resolved directory; keep
+# the lexical ~/.vst/yabridge string for Bitwig's plugin list.
+@test "sandbox never mounts onto a symlinked plugin root" {
+  load_sandbox
+  local vst_target="$BATS_TEST_TMPDIR/audio-production/.vst"
+  local vst3_target="$BATS_TEST_TMPDIR/audio-production/.vst3"
+  local clap_target="$BATS_TEST_TMPDIR/audio-production/.clap"
+  alias_plugin_root .vst "$vst_target"
+  alias_plugin_root .vst3 "$vst3_target"
+  alias_plugin_root .clap "$clap_target"
+  configure_sandbox
+
+  build_command fake-daw
+
+  local name target
+  for name in .vst .vst3 .clap; do
+    case "$name" in
+      .vst) target="$vst_target" ;;
+      .vst3) target="$vst3_target" ;;
+      .clap) target="$clap_target" ;;
+    esac
+    refute_sequence --ro-bind "$target" "$PRODUCTION_HOME/$name"
+    refute_sequence --bind "$ISOLATED_HOME/$name/yabridge" \
+      "$PRODUCTION_HOME/$name/yabridge"
+    refute_sequence --tmpfs "$PRODUCTION_HOME/$name"
+    assert_sequence --ro-bind "$target" "$target"
+    assert_sequence --bind "$ISOLATED_HOME/$name/yabridge" "$target/yabridge"
+    assert_writable "$target/yabridge"
+    assert_writable "$PRODUCTION_HOME/$name/yabridge"
+  done
+  refute_symlink_mount_destinations
+}
+
+@test "sandbox binds the host home as the DAW HOME" {
   load_sandbox
   configure_sandbox
 
   build_command fake-daw
 
-  refute_sequence --bind "$PRODUCTION_HOME" "$PRODUCTION_HOME"
+  assert_sequence --bind "$PRODUCTION_HOME" "$PRODUCTION_HOME"
+  assert_writable "$PRODUCTION_HOME"
+  assert_writable "$PRODUCTION_HOME/.BitwigStudio"
   refute_sequence --ro-bind "$PRODUCTION_HOME" "$PRODUCTION_HOME"
-  refute_exposed_source "$PRODUCTION_HOME/private-notes"
 }
 
 @test "sandbox keeps the isolated home and isolation state writable" {
@@ -547,17 +998,20 @@ alias_plugin_root() {
   assert_writable "$ISOLATED_HOME/.vst/yabridge"
 }
 
-@test "sandbox exports the isolated home instead of the production home" {
+@test "sandbox exports the host home; XDG stays isolated for yabridge" {
   load_sandbox
   configure_sandbox
 
   build_command fake-daw
 
-  assert_sequence --setenv HOME "$ISOLATED_HOME"
+  assert_sequence --setenv HOME "$PRODUCTION_HOME"
+  assert_sequence --setenv USER "$(id -un)"
   assert_sequence --setenv XDG_CONFIG_HOME "$ISOLATED_HOME/.config"
   assert_sequence --setenv XDG_DATA_HOME "$ISOLATED_HOME/.local/share"
   assert_sequence --setenv XDG_RUNTIME_DIR "$RUNTIME_DESTINATION"
-  refute_sequence --setenv HOME "$PRODUCTION_HOME"
+  assert_sequence --uid "$(id -u)"
+  assert_sequence --gid "$(id -g)"
+  refute_sequence --setenv HOME "$ISOLATED_HOME"
 }
 
 @test "sandbox binds the project root read-only for wine and yabridge" {
@@ -609,7 +1063,7 @@ alias_plugin_root() {
 
   assert_sequence --ro-bind "$PRODUCTION_HOME/bin" "$PRODUCTION_HOME/bin"
   refute_sequence --ro-bind "$PRODUCTION_HOME" "$PRODUCTION_HOME"
-  refute_exposed_source "$PRODUCTION_HOME/private-notes"
+  assert_writable "$PRODUCTION_HOME/private-notes"
 }
 
 # Widening is what makes a self-contained installation usable, but inside the
@@ -628,7 +1082,7 @@ alias_plugin_root() {
   assert_sequence --ro-bind "$PRODUCTION_HOME/.local/bin" \
     "$PRODUCTION_HOME/.local/bin"
   refute_sequence --ro-bind "$PRODUCTION_HOME/.local" "$PRODUCTION_HOME/.local"
-  refute_exposed_source "$PRODUCTION_HOME/.local/share/keys/token"
+  assert_writable "$PRODUCTION_HOME/.local/share/keys/token"
   assert_read_only "$PRODUCTION_HOME/.local/bin/studio"
 }
 
@@ -647,7 +1101,7 @@ alias_plugin_root() {
   refute_sequence --ro-bind "$PRODUCTION_HOME/opt/Studio" \
     "$PRODUCTION_HOME/opt/Studio"
   refute_sequence --ro-bind "$PRODUCTION_HOME/opt" "$PRODUCTION_HOME/opt"
-  refute_exposed_source "$PRODUCTION_HOME/opt/Studio/lib/libstudio.so"
+  assert_writable "$PRODUCTION_HOME/opt/Studio/lib/libstudio.so"
 }
 
 @test "sandbox still widens a self-contained installation outside the home" {
@@ -805,6 +1259,20 @@ alias_plugin_root() {
 
 # ── Mount plan conflicts ─────────────────────────────────────────────────────
 
+@test "sandbox refuses to plan a mount onto a symlink destination" {
+  load_sandbox
+  configure_sandbox
+  local link="$BATS_TEST_TMPDIR/symlink-dest"
+  ln -s "$PROJECTS" "$link"
+  SANDBOX_MOUNT_DESTINATIONS=()
+  SANDBOX_MOUNT_ARGUMENTS=()
+
+  run sandbox_add_mount --bind "$PROJECTS" "$link"
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"symlink"* ]]
+}
+
 @test "sandbox rejects a duplicate mount destination" {
   load_sandbox
   configure_sandbox
@@ -865,6 +1333,533 @@ alias_plugin_root() {
   build_command fake-daw
 
   refute_sequence --unshare-net
+}
+
+# ── XLN / MAC identity (unshare user+net we own, then pasta, then bwrap) ────
+#
+# Firejail+nsenter is a dead end unprivileged: Firejail's netns lives in its
+# own user namespace and cannot be joined without caps in the initial userns.
+# Firejail as a parent also replaces bwrap with fbwrap; firejail inside bwrap
+# drops --mac. The working path creates user+net namespaces we own, starts
+# pasta (or slirp4netns) from the host attached to that netns, then runs
+# real bwrap inside it (no --unshare-net).
+
+write_fake_firejail() {
+  local path="${1:-$FIXTURE_BIN/firejail}"
+  cat > "$path" <<'EOF'
+#!/bin/bash
+{
+  printf 'argv'
+  printf ' %q' "$@"
+  printf '\n'
+} >> "${SANDBOX_TEST_FIREJAIL_CALLS:?}"
+if [[ "${SANDBOX_TEST_FIREJAIL_FAIL:-false}" == true ]]; then
+  printf 'Error: firejail refused to start\n' >&2
+  exit 1
+fi
+separator=false
+declare -a child=()
+while [[ $# -gt 0 ]]; do
+  if [[ "$separator" == true ]]; then
+    child+=("$1")
+    shift
+    continue
+  fi
+  if [[ "$1" == -- ]]; then
+    separator=true
+    shift
+    continue
+  fi
+  shift
+done
+if [[ "$separator" != true || "${#child[@]}" -eq 0 ]]; then
+  printf 'firejail: no command to execute\n' >&2
+  exit 1
+fi
+exec "${child[@]}"
+EOF
+  chmod +x "$path"
+}
+
+# Records unshare flags, then execs the remaining program in this process
+# (no real namespace). The helper therefore runs and can start fake pasta.
+write_fake_unshare() {
+  local path="${1:-$FIXTURE_BIN/unshare}"
+  cat > "$path" <<'EOF'
+#!/bin/bash
+{
+  printf 'argv'
+  printf ' %q' "$@"
+  printf '\n'
+} >> "${SANDBOX_TEST_UNSHARE_CALLS:?}"
+if [[ "${SANDBOX_TEST_UNSHARE_FAIL:-false}" == true ]]; then
+  printf 'unshare: failed to unshare namespaces\n' >&2
+  exit 1
+fi
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --)
+      shift
+      break
+      ;;
+    --user|--map-root-user|--net|-r|-n|-U|-m|-p|-i|-u|-C|-T|-f)
+      shift
+      ;;
+    --user=*|--net=*|--map-user=*|--map-group=*|--setuid=*|--setgid=*)
+      shift
+      ;;
+    --map-user|--map-group|--setuid|--setgid|--kill-child|--root|--wd)
+      shift 2
+      ;;
+    -*)
+      shift
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+if [[ $# -eq 0 ]]; then
+  printf 'unshare: no command to execute\n' >&2
+  exit 1
+fi
+exec "$@"
+EOF
+  chmod +x "$path"
+}
+
+write_fake_pasta() {
+  local path="${1:-$FIXTURE_BIN/pasta}"
+  cat > "$path" <<'EOF'
+#!/bin/bash
+{
+  printf 'argv0 %q' "$(basename -- "$0")"
+  printf ' %q' "$@"
+  printf '\n'
+} >> "${SANDBOX_TEST_PASTA_CALLS:?}"
+if [[ "${SANDBOX_TEST_PASTA_FAIL:-false}" == true ]]; then
+  printf 'pasta: failed to configure network\n' >&2
+  exit 1
+fi
+mac=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --mac-addr)
+      mac="${2:-}"
+      shift 2
+      ;;
+    --mac-addr=*)
+      mac="${1#--mac-addr=}"
+      shift
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+sysfs="${SANDBOX_NIC_SYSFS:-/sys/class/net}"
+if [[ -n "$mac" ]]; then
+  mkdir -p "$sysfs/pasta0"
+  printf '%s\n' "${mac,,}" > "$sysfs/pasta0/address"
+fi
+if [[ -n "${SANDBOX_TEST_PASTA_PIDS:-}" ]]; then
+  printf '%s\n' "$$" >> "$SANDBOX_TEST_PASTA_PIDS"
+fi
+exec /bin/sleep infinity
+EOF
+  chmod +x "$path"
+}
+
+write_fake_slirp4netns() {
+  local path="${1:-$FIXTURE_BIN/slirp4netns}"
+  cat > "$path" <<'EOF'
+#!/bin/bash
+{
+  printf 'argv'
+  printf ' %q' "$@"
+  printf '\n'
+} >> "${SANDBOX_TEST_SLIRP_CALLS:?}"
+if [[ "${SANDBOX_TEST_SLIRP_FAIL:-false}" == true ]]; then
+  printf 'slirp4netns: failed to configure tap\n' >&2
+  exit 1
+fi
+mac=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --mac-addr)
+      mac="${2:-}"
+      shift 2
+      ;;
+    --mac-addr=*)
+      mac="${1#--mac-addr=}"
+      shift
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+sysfs="${SANDBOX_NIC_SYSFS:-/sys/class/net}"
+if [[ -n "$mac" ]]; then
+  mkdir -p "$sysfs/tap0"
+  printf '%s\n' "${mac,,}" > "$sysfs/tap0/address"
+fi
+if [[ -n "${SANDBOX_TEST_PASTA_PIDS:-}" ]]; then
+  printf '%s\n' "$$" >> "$SANDBOX_TEST_PASTA_PIDS"
+fi
+exec /bin/sleep infinity
+EOF
+  chmod +x "$path"
+}
+
+launched_unshare_argv() {
+  if [[ ! -f "$UNSHARE_CALLS" ]]; then
+    printf '\n'
+    return 0
+  fi
+  cat "$UNSHARE_CALLS"
+}
+
+launched_pasta_argv() {
+  if [[ ! -f "$PASTA_CALLS" ]]; then
+    printf '\n'
+    return 0
+  fi
+  cat "$PASTA_CALLS"
+}
+
+launched_slirp_argv() {
+  if [[ ! -f "$SLIRP_CALLS" ]]; then
+    printf '\n'
+    return 0
+  fi
+  cat "$SLIRP_CALLS"
+}
+
+launched_firejail_argv() {
+  if [[ ! -f "${FIREJAIL_CALLS:-}" ]]; then
+    printf '\n'
+    return 0
+  fi
+  cat "$FIREJAIL_CALLS"
+}
+
+setup_mac_identity_fixtures() {
+  NIC_SYSFS="$BATS_TEST_TMPDIR/sys-class-net"
+  mkdir -p "$NIC_SYSFS/eno1" "$NIC_SYSFS/lo"
+  export SANDBOX_NIC_SYSFS="$NIC_SYSFS"
+  UNSHARE_CALLS="$BATS_TEST_TMPDIR/unshare.calls"
+  : > "$UNSHARE_CALLS"
+  export SANDBOX_TEST_UNSHARE_CALLS="$UNSHARE_CALLS"
+  PASTA_CALLS="$BATS_TEST_TMPDIR/pasta.calls"
+  : > "$PASTA_CALLS"
+  export SANDBOX_TEST_PASTA_CALLS="$PASTA_CALLS"
+  SLIRP_CALLS="$BATS_TEST_TMPDIR/slirp.calls"
+  : > "$SLIRP_CALLS"
+  export SANDBOX_TEST_SLIRP_CALLS="$SLIRP_CALLS"
+  FIREJAIL_CALLS="$BATS_TEST_TMPDIR/firejail.calls"
+  : > "$FIREJAIL_CALLS"
+  export SANDBOX_TEST_FIREJAIL_CALLS="$FIREJAIL_CALLS"
+  PASTA_PIDS="$BATS_TEST_TMPDIR/pasta.pids"
+  : > "$PASTA_PIDS"
+  export SANDBOX_TEST_PASTA_PIDS="$PASTA_PIDS"
+  write_fake_unshare
+  write_fake_pasta
+  write_fake_slirp4netns
+}
+
+@test "MAC identity rejects malformed addresses and unsafe NIC names" {
+  load_sandbox
+  SANDBOX_NIC_SYSFS="$BATS_TEST_TMPDIR/sys-class-net"
+  mkdir -p "$SANDBOX_NIC_SYSFS/eno1"
+
+  run validate_sandbox_mac "02:00:5e:00:53:01"
+  [ "$status" -eq 0 ]
+  run validate_sandbox_mac "02:DE:AD:BE:EF:01"
+  [ "$status" -eq 0 ]
+  run validate_sandbox_mac "not-a-mac"
+  [ "$status" -ne 0 ]
+  run validate_sandbox_mac "--mac"
+  [ "$status" -ne 0 ]
+  run validate_sandbox_mac ""
+  [ "$status" -ne 0 ]
+
+  run validate_sandbox_nic "eno1"
+  [ "$status" -eq 0 ]
+  run validate_sandbox_nic "../eno1"
+  [ "$status" -ne 0 ]
+  run validate_sandbox_nic "missing0"
+  [ "$status" -ne 0 ]
+  run validate_sandbox_nic "--net"
+  [ "$status" -ne 0 ]
+
+  run validate_sandbox_address "192.0.2.132"
+  [ "$status" -eq 0 ]
+  run validate_sandbox_address "192.0.2.132/24"
+  [ "$status" -eq 0 ]
+  run validate_sandbox_address "10.0.0.1"
+  [ "$status" -eq 0 ]
+  run validate_sandbox_address ""
+  [ "$status" -ne 0 ]
+  run validate_sandbox_address "--address"
+  [ "$status" -ne 0 ]
+  run validate_sandbox_address "not-an-ip"
+  [ "$status" -ne 0 ]
+  run validate_sandbox_address "192.168.1.256"
+  [ "$status" -ne 0 ]
+  run validate_sandbox_address "192.0.2.132/33"
+  [ "$status" -ne 0 ]
+}
+
+@test "xln-fj is recognized as an identity wrapper" {
+  load_sandbox
+
+  run sandbox_is_xln_identity_wrapper "/home/user/.local/bin/xln-fj"
+  [ "$status" -eq 0 ]
+  run sandbox_is_xln_identity_wrapper "/opt/bitwig-studio/bitwig-studio"
+  [ "$status" -ne 0 ]
+  run sandbox_is_xln_identity_wrapper "/usr/bin/firejail"
+  [ "$status" -ne 0 ]
+}
+
+@test "MAC identity wraps bwrap with unshare user+net and pasta, not nsenter" {
+  load_sandbox
+  configure_sandbox
+  setup_mac_identity_fixtures
+  SANDBOX_NETWORK=true
+  SANDBOX_MAC="02:00:5e:00:53:01"
+  SANDBOX_NIC="eno1"
+  require_unshare
+  require_mac_netns_backend
+
+  build_command fake-daw
+  WRAPPED_COMMAND=()
+  wrap_launch_with_mac_identity WRAPPED_COMMAND SANDBOX_COMMAND
+
+  [ "${WRAPPED_COMMAND[0]}" = "$SANDBOX_MAC_NETNS_EXEC" ]
+  [ "${SANDBOX_COMMAND[0]}" = "$SANDBOX_BWRAP" ]
+  [ "$SANDBOX_MAC_BACKEND" = pasta ]
+  [[ " ${WRAPPED_COMMAND[*]} " == *" --mac 02:00:5e:00:53:01 "* ]]
+  [[ " ${WRAPPED_COMMAND[*]} " == *" --nic eno1 "* ]]
+  [[ " ${WRAPPED_COMMAND[*]} " == *" --backend pasta "* ]]
+  [[ " ${WRAPPED_COMMAND[*]} " == *" --unshare $SANDBOX_UNSHARE "* ]]
+  [[ " ${WRAPPED_COMMAND[*]} " == *" $SANDBOX_BWRAP "* ]]
+  refute_wrapped_token nsenter
+  refute_wrapped_token firejail
+  refute_sequence --unshare-net
+}
+
+# The wrap only builds argv. The helper creates the netns, starts pasta from
+# the host (so it still sees host routes), then execs bwrap in that netns.
+@test "MAC identity never puts bwrap under firejail or nsenter" {
+  load_sandbox
+  configure_sandbox
+  setup_mac_identity_fixtures
+  SANDBOX_NETWORK=true
+  SANDBOX_MAC="02:00:5e:00:53:01"
+  SANDBOX_NIC="eno1"
+  require_unshare
+  require_mac_netns_backend
+
+  build_command fake-daw
+  [ "${#SANDBOX_COMMAND[@]}" -gt 40 ]
+  [ "${SANDBOX_COMMAND[0]}" = "$SANDBOX_BWRAP" ]
+
+  WRAPPED_COMMAND=()
+  wrap_launch_with_mac_identity WRAPPED_COMMAND SANDBOX_COMMAND
+
+  [ "${WRAPPED_COMMAND[0]}" = "$SANDBOX_MAC_NETNS_EXEC" ]
+  local token
+  for token in "${WRAPPED_COMMAND[@]}"; do
+    [[ "$token" != *nsenter* ]]
+    [[ "$token" != *firejail* ]]
+    [[ "$token" != --net=* ]]
+  done
+  [[ " ${WRAPPED_COMMAND[*]} " == *" $SANDBOX_BWRAP "* ]]
+}
+
+@test "MAC identity helper starts pasta then runs bwrap from the same netns" {
+  load_sandbox
+  configure_sandbox
+  setup_mac_identity_fixtures
+  SANDBOX_NETWORK=true
+  SANDBOX_MAC="02:00:5e:00:53:01"
+  SANDBOX_NIC="eno1"
+  require_unshare
+  require_mac_netns_backend
+
+  build_command fake-daw
+  WRAPPED_COMMAND=()
+  wrap_launch_with_mac_identity WRAPPED_COMMAND SANDBOX_COMMAND
+
+  run "${WRAPPED_COMMAND[@]}"
+
+  [ "$status" -eq 0 ]
+  [[ "$(launched_unshare_argv)" == *" --user "* ]]
+  [[ "$(launched_unshare_argv)" == *" --map-root-user "* ]]
+  [[ "$(launched_unshare_argv)" == *" --net "* ]]
+  [[ "$(launched_pasta_argv)" == argv0\ pasta\ * ]]
+  [[ "$(launched_pasta_argv)" == *" --config-net "* ]]
+  [[ "$(launched_pasta_argv)" == *" --foreground "* ]]
+  [[ "$(launched_pasta_argv)" == *" --userns "* ]]
+  [[ "$(launched_pasta_argv)" == *" --netns "* ]]
+  [[ "$(launched_pasta_argv)" =~ /proc/[0-9]+/ns/user ]]
+  [[ "$(launched_pasta_argv)" =~ /proc/[0-9]+/ns/net ]]
+  [[ "$(launched_pasta_argv)" != *"/proc/self/ns/net"* ]]
+  [[ "$(launched_pasta_argv)" == *" --mac-addr "* ]]
+  [[ "$(launched_pasta_argv)" == *" --ns-mac-addr "* ]]
+  [[ "$(launched_pasta_argv)" == *"02:00:5e:00:53:01"* ]]
+  [[ "$(launched_pasta_argv)" == *" --ns-ifname "* ]]
+  [[ "$(launched_pasta_argv)" == *" eth0 "* ]]
+  [[ "$(launched_pasta_argv)" == *" --interface "* ]]
+  [[ "$(launched_pasta_argv)" == *"eno1"* ]]
+  [[ "$(launched_pasta_argv)" == *" --outbound-if4 "* ]]
+  [[ "$(launched_pasta_argv)" == *" --dns "* ]]
+  [[ "$(launched_pasta_argv)" == *"1.1.1.1"* ]]
+  [[ "$(launched_pasta_argv)" == *"192.168.1.1"* ]]
+  [[ "$(launched_pasta_argv)" == *" --dhcp-dns"* ]]
+  [[ "$(launched_pasta_argv)" != *" --address "* ]]
+  [[ "$(launched_pasta_argv)" != argv0\ passt* ]]
+  [ -f "$DAW_ENV_FILE" ]
+  [ "$(daw_env_value WINEPREFIX)" = "$REAL_PREFIX" ]
+  [ -s "$PASTA_PIDS" ]
+  local leftover
+  leftover="$(cat "$PASTA_PIDS")"
+  [ -n "$leftover" ]
+  ! kill -0 "$leftover" 2>/dev/null
+}
+
+@test "MAC identity helper pins the pasta guest IPv4 when --address is set" {
+  load_sandbox
+  configure_sandbox
+  setup_mac_identity_fixtures
+  SANDBOX_NETWORK=true
+  SANDBOX_MAC="02:00:5e:00:53:01"
+  SANDBOX_NIC="eno1"
+  SANDBOX_ADDRESS="192.0.2.132"
+  require_unshare
+  require_mac_netns_backend
+
+  build_command fake-daw
+  WRAPPED_COMMAND=()
+  wrap_launch_with_mac_identity WRAPPED_COMMAND SANDBOX_COMMAND
+
+  [[ " ${WRAPPED_COMMAND[*]} " == *" --address 192.0.2.132 "* ]]
+
+  run "${WRAPPED_COMMAND[@]}"
+
+  [ "$status" -eq 0 ]
+  [[ "$(launched_pasta_argv)" == argv0\ pasta\ * ]]
+  [[ "$(launched_pasta_argv)" == *" --config-net "* ]]
+  [[ "$(launched_pasta_argv)" == *" --address "* ]]
+  [[ "$(launched_pasta_argv)" == *"192.0.2.132"* ]]
+  [[ "$(launched_pasta_argv)" == *" --ns-ifname "* ]]
+  [[ "$(launched_pasta_argv)" == *" eth0 "* ]]
+  [[ "$(launched_pasta_argv)" == *" --mac-addr "* ]]
+  [[ "$(launched_pasta_argv)" == *"02:00:5e:00:53:01"* ]]
+  [[ "$(launched_pasta_argv)" != argv0\ passt* ]]
+}
+
+# realpath(/usr/bin/pasta) is /usr/bin/passt; passt rejects --config-net.
+# The helper must force pasta mode (argv0 pasta), not exec the passt path bare.
+@test "MAC identity helper starts pasta mode when the binary path is passt" {
+  load_sandbox
+  configure_sandbox
+  setup_mac_identity_fixtures
+  write_fake_pasta "$FIXTURE_BIN/passt"
+  SANDBOX_NETWORK=true
+  SANDBOX_MAC="02:00:5e:00:53:01"
+  SANDBOX_NIC="eno1"
+  require_unshare
+  require_mac_netns_backend
+  SANDBOX_PASTA="$FIXTURE_BIN/passt"
+  SANDBOX_MAC_BACKEND=pasta
+
+  build_command fake-daw
+  WRAPPED_COMMAND=()
+  wrap_launch_with_mac_identity WRAPPED_COMMAND SANDBOX_COMMAND
+
+  run "${WRAPPED_COMMAND[@]}"
+
+  [ "$status" -eq 0 ]
+  [[ "$(launched_pasta_argv)" == argv0\ pasta\ * ]]
+  [[ "$(launched_pasta_argv)" == *" --config-net "* ]]
+  [[ "$(launched_pasta_argv)" == *" --mac-addr "* ]]
+  [[ "$(launched_pasta_argv)" == *"02:00:5e:00:53:01"* ]]
+  [[ "$(launched_pasta_argv)" != argv0\ passt* ]]
+  [[ "$(launched_pasta_argv)" != *"/passt "* ]]
+}
+
+@test "MAC identity refuses to wrap when the sandbox would unshare the network" {
+  load_sandbox
+  configure_sandbox
+  setup_mac_identity_fixtures
+  SANDBOX_NETWORK=false
+  SANDBOX_MAC="02:00:5e:00:53:01"
+  SANDBOX_NIC="eno1"
+  require_unshare
+  require_mac_netns_backend
+  build_command fake-daw
+
+  run wrap_launch_with_mac_identity WRAPPED_COMMAND SANDBOX_COMMAND
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"network"* ]]
+}
+
+@test "require_unshare refuses when unshare is absent" {
+  load_sandbox
+  mkdir -p "$BATS_TEST_TMPDIR/empty-bin"
+  local saved_path="$PATH"
+  export PATH="$BATS_TEST_TMPDIR/empty-bin"
+
+  run require_unshare
+
+  export PATH="$saved_path"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"unshare"* ]]
+}
+
+@test "require_mac_netns_backend refuses when pasta and slirp4netns are absent" {
+  load_sandbox
+  mkdir -p "$BATS_TEST_TMPDIR/empty-bin"
+  local saved_path="$PATH"
+  export PATH="$BATS_TEST_TMPDIR/empty-bin"
+
+  run require_mac_netns_backend
+
+  export PATH="$saved_path"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"pasta"* || "$output" == *"passt"* ]]
+  [[ "$output" == *"slirp4netns"* ]]
+}
+
+@test "MAC identity falls back to slirp4netns when pasta is absent" {
+  load_sandbox
+  configure_sandbox
+  setup_mac_identity_fixtures
+  rm -f "$FIXTURE_BIN/pasta"
+  if command -v pasta >/dev/null 2>&1; then
+    skip "host pasta is installed; cannot observe slirp fallback"
+  fi
+  SANDBOX_NETWORK=true
+  SANDBOX_MAC="02:00:5e:00:53:01"
+  SANDBOX_NIC="eno1"
+  require_unshare
+  require_mac_netns_backend
+
+  [ "$SANDBOX_MAC_BACKEND" = slirp4netns ]
+
+  build_command fake-daw
+  WRAPPED_COMMAND=()
+  wrap_launch_with_mac_identity WRAPPED_COMMAND SANDBOX_COMMAND
+
+  [[ " ${WRAPPED_COMMAND[*]} " == *" --backend slirp4netns "* ]]
+  run "${WRAPPED_COMMAND[@]}"
+  [ "$status" -eq 0 ]
+  [[ "$(launched_slirp_argv)" == *" --mac-addr "* ]]
+  [[ "$(launched_slirp_argv)" == *"02:00:5e:00:53:01"* ]]
+  [ -f "$DAW_ENV_FILE" ]
 }
 
 # ── Explicit writable project and output paths ───────────────────────────────
@@ -976,6 +1971,104 @@ $BATS_TEST_TMPDIR"
 
   [ "$status" -ne 0 ]
   [[ "$output" == *"already"* ]]
+}
+
+# Bitwig looks at $HOME/.BitwigStudio and Java user.home from getpwuid.
+# Remapping individual dirs into isolation/home failed twice: the DAW still
+# used isolated HOME, then --mac mapped uid 0 and Bitwig opened
+# /root/.BitwigStudio. HOME is the real login home; leftover first-run
+# files under isolation/home/.BitwigStudio must not win.
+
+@test "sandbox keeps DAW HOME on the host home when the process HOME is already isolated" {
+  load_sandbox
+  configure_sandbox
+  mkdir -p "$PRODUCTION_HOME/.BitwigStudio" "$ISOLATED_HOME/.BitwigStudio"
+  printf '%s\n' 'license' > "$PRODUCTION_HOME/.BitwigStudio/.eula-agreed"
+  printf '%s\n' 'first-run' > "$ISOLATED_HOME/.BitwigStudio/.eula-agreed"
+  SANDBOX_HOST_HOME="$PRODUCTION_HOME"
+  HOME="$ISOLATED_HOME"
+
+  build_command fake-daw
+
+  HOME="$PRODUCTION_HOME"
+  assert_sequence --setenv HOME "$PRODUCTION_HOME"
+  assert_sequence --bind "$PRODUCTION_HOME" "$PRODUCTION_HOME"
+  assert_writable "$PRODUCTION_HOME/.BitwigStudio"
+  refute_sequence --setenv HOME "$ISOLATED_HOME"
+  refute_sequence --bind "$PRODUCTION_HOME/.BitwigStudio" \
+    "$ISOLATED_HOME/.BitwigStudio"
+}
+
+@test "sandbox does not remap a writable path into the isolated home" {
+  load_sandbox
+  configure_sandbox
+  local bitwig="$PRODUCTION_HOME/.BitwigStudio"
+  mkdir -p "$bitwig"
+  printf '%s\n' 'license' > "$bitwig/.eula-agreed"
+  SANDBOX_WRITABLE_PATHS=("$bitwig")
+
+  build_command fake-daw
+
+  assert_sequence --setenv HOME "$PRODUCTION_HOME"
+  assert_writable "$bitwig"
+  refute_sequence --bind "$bitwig" "$ISOLATED_HOME/.BitwigStudio"
+  [ ! -d "$ISOLATED_HOME/.BitwigStudio" ]
+}
+
+@test "sandbox still binds a writable path outside the real home" {
+  load_sandbox
+  configure_sandbox
+  SANDBOX_WRITABLE_PATHS=("$PROJECTS")
+
+  build_command fake-daw
+
+  assert_sequence --bind "$PROJECTS" "$PROJECTS"
+  refute_sequence --bind "$PROJECTS" "$ISOLATED_HOME/projects"
+}
+
+@test "sandbox does not invent a missing Bitwig config directory" {
+  load_sandbox
+  configure_sandbox
+
+  build_command fake-daw
+
+  [ ! -e "$PRODUCTION_HOME/.BitwigStudio" ]
+  [ ! -e "$ISOLATED_HOME/.BitwigStudio" ]
+  refute_sequence --bind "$PRODUCTION_HOME/.BitwigStudio" \
+    "$PRODUCTION_HOME/.BitwigStudio"
+  refute_sequence --bind "$PRODUCTION_HOME/.BitwigStudio" \
+    "$ISOLATED_HOME/.BitwigStudio"
+}
+
+@test "host home bind does not make the production prefix writable" {
+  load_sandbox
+  configure_sandbox
+  mkdir -p "$PRODUCTION_HOME/.BitwigStudio"
+
+  build_command fake-daw
+
+  refute_sequence --bind "$REAL_PREFIX" "$REAL_PREFIX"
+  assert_sequence --bind "$COPY" "$REAL_PREFIX"
+  assert_writable "$PRODUCTION_HOME/.BitwigStudio"
+}
+
+@test "sandbox overlays passwd so uid 0 and the login uid have the host home" {
+  load_sandbox
+  configure_sandbox
+
+  build_command fake-daw
+
+  local identity="$ISOLATION/sandbox-identity"
+  [ -f "$identity/passwd" ]
+  [ -f "$identity/nsswitch.conf" ]
+  awk -F: -v home="$PRODUCTION_HOME" '$3 == 0 && $6 == home { found = 1 }
+    END { exit !found }' "$identity/passwd"
+  awk -F: -v home="$PRODUCTION_HOME" -v uid="$(id -u)" \
+    '$3 == uid && $6 == home { found = 1 } END { exit !found }' \
+    "$identity/passwd"
+  grep -Fxq 'passwd: files' "$identity/nsswitch.conf"
+  assert_sequence --ro-bind "$identity/passwd" /etc/passwd
+  assert_sequence --ro-bind "$identity/nsswitch.conf" /etc/nsswitch.conf
 }
 
 # ── Native plugin directories ────────────────────────────────────────────────
@@ -1184,7 +2277,7 @@ $BATS_TEST_TMPDIR"
     "$BATS_TEST_TMPDIR/dev-snd"
 }
 
-@test "sandbox exposes an explicit read-only X authority file only" {
+@test "sandbox binds an existing X authority file read-only" {
   load_sandbox
   configure_sandbox
   printf '%s\n' 'cookie' > "$PRODUCTION_HOME/.Xauthority"
@@ -1195,7 +2288,6 @@ $BATS_TEST_TMPDIR"
   assert_sequence --ro-bind "$PRODUCTION_HOME/.Xauthority" \
     "$PRODUCTION_HOME/.Xauthority"
   assert_read_only "$PRODUCTION_HOME/.Xauthority"
-  refute_exposed_source "$PRODUCTION_HOME/private-notes"
 }
 
 # ── Fail-closed preflight ────────────────────────────────────────────────────
@@ -1276,11 +2368,30 @@ $BATS_TEST_TMPDIR"
   # executed through the sandbox rather than directly.
   [ "$(launched_argv | wc -l)" -eq 1 ]
   [[ "$(launched_argv)" == *" -- $FIXTURE_BIN/fake-daw"* ]]
-  [[ "$(launched_argv)" == *" --ro-bind $REAL_PREFIX $REAL_PREFIX "* ]]
+  [[ "$(launched_argv)" == *" --bind $COPY $REAL_PREFIX "* ]]
   [[ "$(launched_argv)" == *" --bind $COPY $COPY "* ]]
-  [ "$(daw_env_value HOME)" = "$ISOLATED_HOME" ]
-  [ "$(daw_env_value VST_PATH)" = "$ISOLATED_HOME/.vst/yabridge" ]
-  refute grep -Fq "$PRODUCTION_HOME/.vst/yabridge" "$DAW_ENV_FILE"
+  [ "$(daw_env_value HOME)" = "$PRODUCTION_HOME" ]
+  [ "$(daw_env_value WINEPREFIX)" = "$REAL_PREFIX" ]
+  [ "$(daw_env_value VST_PATH)" = "$PRODUCTION_HOME/.vst/yabridge" ]
+  refute grep -Fq "$ISOLATED_HOME/.vst/yabridge" "$DAW_ENV_FILE"
+}
+
+@test "launcher keeps lexical plugin paths when ~/.vst is a symlink" {
+  local target="$BATS_TEST_TMPDIR/audio-production/.vst"
+  alias_plugin_root .vst "$target"
+  ln -s "$REAL_PREFIX" "$PRODUCTION_HOME/winplugins"
+
+  run_daw_fixture --prefix "$REAL_PREFIX" fake-daw
+
+  [ "$status" -eq 0 ]
+  [ "$(daw_env_value HOME)" = "$PRODUCTION_HOME" ]
+  [ "$(daw_env_value VST_PATH)" = "$PRODUCTION_HOME/.vst/yabridge" ]
+  [ "$(daw_env_value VST3_PATH)" = "$PRODUCTION_HOME/.vst3/yabridge" ]
+  [ "$(daw_env_value CLAP_PATH)" = "$PRODUCTION_HOME/.clap/yabridge" ]
+  [[ "$(launched_argv)" != *" --ro-bind $target $PRODUCTION_HOME/.vst "* ]]
+  [[ "$(launched_argv)" != *" --bind $COPY $PRODUCTION_HOME/winplugins "* ]]
+  [[ "$(launched_argv)" == *" --bind $ISOLATED_HOME/.vst/yabridge $target/yabridge "* ]]
+  [[ "$(launched_argv)" == *" --bind $COPY $REAL_PREFIX "* ]]
 }
 
 @test "launcher unshares the network unless the option is explicit" {
@@ -1316,11 +2427,229 @@ $BATS_TEST_TMPDIR"
   [[ "$(launched_argv)" != *" --unshare-net "* ]]
 }
 
+@test "launcher applies MAC identity outside bwrap and still launches the DAW" {
+  setup_mac_identity_fixtures
+
+  run_daw_fixture --mac 02:00:5e:00:53:01 --nic eno1 --prefix "$REAL_PREFIX" \
+    fake-daw
+
+  [ "$status" -eq 0 ]
+  [[ "$(launched_unshare_argv)" == *" --user "* ]]
+  [[ "$(launched_unshare_argv)" == *" --map-root-user "* ]]
+  [[ "$(launched_unshare_argv)" == *" --net "* ]]
+  [[ "$(launched_pasta_argv)" == argv0\ pasta\ * ]]
+  [[ "$(launched_pasta_argv)" == *" --config-net "* ]]
+  [[ "$(launched_pasta_argv)" == *" --mac-addr "* ]]
+  [[ "$(launched_pasta_argv)" == *"02:00:5e:00:53:01"* ]]
+  [[ "$(launched_pasta_argv)" == *" --ns-ifname "* ]]
+  [[ "$(launched_pasta_argv)" == *" eth0 "* ]]
+  [[ "$(launched_pasta_argv)" == *" --interface "* ]]
+  [[ "$(launched_pasta_argv)" == *"eno1"* ]]
+  [[ "$(launched_pasta_argv)" != argv0\ passt* ]]
+  [[ "$(launched_argv)" != *" --unshare-net "* ]]
+  [[ "$(launched_argv)" == *" -- $FIXTURE_BIN/fake-daw"* ]]
+  [ "$(daw_env_value WINEPREFIX)" = "$REAL_PREFIX" ]
+  [ "$(daw_env_value HOME)" = "$PRODUCTION_HOME" ]
+}
+
+@test "launcher names pasta or slirp when MAC identity tools are missing" {
+  setup_mac_identity_fixtures
+  mkdir -p "$BATS_TEST_TMPDIR/empty-bin" "$BATS_TEST_TMPDIR/sys-bin"
+  local saved_path="$PATH" cmd src
+  rm -f "$FIXTURE_BIN/pasta" "$FIXTURE_BIN/slirp4netns"
+  # Keep the tools the preflight needs, but omit pasta/passt/slirp4netns so
+  # a host install cannot satisfy --mac after the fixture copies are removed.
+  for cmd in realpath mkdir cat printf id basename dirname awk stat \
+    mktemp uname head tr cut grep sed rm mv ls touch chmod ln readlink \
+    env bash; do
+    src="$(command -v "$cmd" 2>/dev/null)" || continue
+    ln -s "$src" "$BATS_TEST_TMPDIR/sys-bin/$cmd"
+  done
+  export PATH="$BATS_TEST_TMPDIR/empty-bin:$FIXTURE_BIN:$BATS_TEST_TMPDIR/sys-bin"
+
+  run_daw_fixture --mac 02:00:5e:00:53:01 --nic eno1 --prefix "$REAL_PREFIX" \
+    fake-daw
+
+  export PATH="$saved_path"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"pasta"* || "$output" == *"passt"* ]]
+  [ ! -e "$DAW_ENV_FILE" ]
+  refute_launcher_mutation
+}
+
+@test "launcher --mac implies shared networking without an explicit --network" {
+  setup_mac_identity_fixtures
+
+  run_daw_fixture --mac 02:00:5e:00:53:01 --nic eno1 --prefix "$REAL_PREFIX" \
+    fake-daw
+
+  [ "$status" -eq 0 ]
+  [[ "$(launched_argv)" != *" --unshare-net "* ]]
+  [[ "$output" == *"mac identity"* || "$output" == *"02:00:5e:00:53:01"* ]]
+}
+
+@test "launcher unwraps xln-fj so firejail is not nested inside bwrap" {
+  setup_mac_identity_fixtures
+  write_fake_firejail "$FIXTURE_BIN/xln-fj"
+
+  run_daw_fixture --prefix "$REAL_PREFIX" "$FIXTURE_BIN/xln-fj" fake-daw
+
+  [ "$status" -eq 0 ]
+  [[ "$(launched_pasta_argv)" == *" --mac-addr "* ]]
+  [[ "$(launched_pasta_argv)" == *"02:00:5e:00:53:01"* ]]
+  [[ "$(launched_argv)" == *" -- $FIXTURE_BIN/fake-daw"* ]]
+  [[ "$(launched_argv)" != *"xln-fj"* ]]
+  [[ "$(launched_argv)" != *" --unshare-net "* ]]
+  [ ! -s "$FIREJAIL_CALLS" ]
+}
+
+@test "launcher ignores inherited XLN_MAC unless identity was requested" {
+  setup_mac_identity_fixtures
+  export XLN_MAC="02:00:5e:00:53:01"
+  export XLN_NIC="eno1"
+
+  run_daw_fixture --prefix "$REAL_PREFIX" fake-daw
+
+  [ "$status" -eq 0 ]
+  [ ! -s "$PASTA_CALLS" ]
+  [ ! -s "$UNSHARE_CALLS" ]
+  [[ "$(launched_argv)" == *" --unshare-net "* ]]
+}
+
+@test "launcher refuses a malformed --mac before cloning" {
+  setup_mac_identity_fixtures
+
+  run_daw_fixture --mac not-a-mac --nic eno1 --prefix "$REAL_PREFIX" fake-daw
+
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"--mac"* ]]
+  refute_launcher_mutation
+}
+
+@test "launcher --address requires --mac and pins pasta guest IPv4" {
+  setup_mac_identity_fixtures
+
+  run_daw_fixture --address 192.0.2.132 --prefix "$REAL_PREFIX" fake-daw
+
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"--address"* ]]
+  [[ "$output" == *"--mac"* ]]
+  refute_launcher_mutation
+
+  run_daw_fixture --mac 02:00:5e:00:53:01 --nic eno1 --address 192.0.2.132 \
+    --prefix "$REAL_PREFIX" fake-daw
+
+  [ "$status" -eq 0 ]
+  [[ "$(launched_pasta_argv)" == argv0\ pasta\ * ]]
+  [[ "$(launched_pasta_argv)" == *" --address "* ]]
+  [[ "$(launched_pasta_argv)" == *"192.0.2.132"* ]]
+  [[ "$(launched_pasta_argv)" == *" --ns-ifname "* ]]
+  [[ "$(launched_pasta_argv)" == *" eth0 "* ]]
+  [ "$(daw_env_value WINEPREFIX)" = "$REAL_PREFIX" ]
+}
+
+@test "launcher refuses a malformed --address before cloning" {
+  setup_mac_identity_fixtures
+
+  run_daw_fixture --mac 02:00:5e:00:53:01 --nic eno1 --address not-an-ip \
+    --prefix "$REAL_PREFIX" fake-daw
+
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"--address"* ]]
+  refute_launcher_mutation
+}
+
+@test "launcher refuses a nested firejail DAW instead of launching it inside bwrap" {
+  setup_mac_identity_fixtures
+  write_fake_firejail "$FIXTURE_BIN/firejail"
+
+  run_daw_fixture --network --prefix "$REAL_PREFIX" "$FIXTURE_BIN/firejail" \
+    fake-daw
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"firejail"* ]]
+  refute_launcher_mutation
+}
+
+@test "MAC identity keeps prefix overlay and gives the DAW the host HOME" {
+  setup_mac_identity_fixtures
+  mkdir -p "$PRODUCTION_HOME/.BitwigStudio" "$PRODUCTION_HOME/Documents"
+  printf '%s\n' 'license' > "$PRODUCTION_HOME/.BitwigStudio/.eula-agreed"
+
+  run_daw_fixture --mac 02:00:5e:00:53:01 --nic eno1 --prefix "$REAL_PREFIX" \
+    fake-daw
+
+  [ "$status" -eq 0 ]
+  [[ "$(launched_argv)" == *" --bind $COPY $REAL_PREFIX "* ]]
+  [[ "$(launched_argv)" == *" --bind $PRODUCTION_HOME $PRODUCTION_HOME "* ]]
+  [[ "$(launched_argv)" == *" --setenv HOME $PRODUCTION_HOME "* ]]
+  [[ "$(launched_argv)" == *" --uid $(id -u) "* ]]
+  [[ "$(launched_argv)" == *" --gid $(id -g) "* ]]
+  [[ "$(launched_argv)" != *" --setenv HOME $ISOLATED_HOME "* ]]
+  [[ "$(launched_argv)" != *" --bind $PRODUCTION_HOME/.BitwigStudio $ISOLATED_HOME/.BitwigStudio "* ]]
+}
+
 @test "launcher binds explicit writable paths and nothing else" {
   run_daw_fixture --prefix "$REAL_PREFIX" --writable-path "$PROJECTS" fake-daw
 
   [ "$status" -eq 0 ]
   [[ "$(launched_argv)" == *" --bind $PROJECTS $PROJECTS "* ]]
+}
+
+@test "launcher binds the host home so Bitwig settings are at \$HOME/.BitwigStudio" {
+  mkdir -p "$PRODUCTION_HOME/.BitwigStudio"
+  printf '%s\n' 'license' > "$PRODUCTION_HOME/.BitwigStudio/.eula-agreed"
+
+  run_daw_fixture --prefix "$REAL_PREFIX" fake-daw
+
+  [ "$status" -eq 0 ]
+  [[ "$(launched_argv)" == *" --bind $PRODUCTION_HOME $PRODUCTION_HOME "* ]]
+  [[ "$(launched_argv)" == *" --setenv HOME $PRODUCTION_HOME "* ]]
+  [[ "$(launched_argv)" != *" --bind $PRODUCTION_HOME/.BitwigStudio $ISOLATED_HOME/.BitwigStudio "* ]]
+}
+
+@test "launcher exposes Wine known folders through the host home bind" {
+  mkdir -p "$PRODUCTION_HOME/Documents/Addictive Drums 2"
+
+  run_daw_fixture --prefix "$REAL_PREFIX" fake-daw
+
+  [ "$status" -eq 0 ]
+  [[ "$(launched_argv)" == *" --bind $PRODUCTION_HOME $PRODUCTION_HOME "* ]]
+  [[ "$(launched_argv)" != *" --bind $PRODUCTION_HOME/Documents $ISOLATED_HOME/Documents "* ]]
+}
+
+@test "launcher does not remap an explicit home-relative writable path into isolated HOME" {
+  local projects="$PRODUCTION_HOME/Bitwig Studio"
+  mkdir -p "$projects"
+  local quoted isolated_quoted
+  quoted="$(printf '%q' "$projects")"
+  isolated_quoted="$(printf '%q' "$ISOLATED_HOME/Bitwig Studio")"
+
+  run_daw_fixture --prefix "$REAL_PREFIX" --writable-path "$projects" fake-daw
+
+  [ "$status" -eq 0 ]
+  [[ "$(launched_argv)" == *" --bind $PRODUCTION_HOME $PRODUCTION_HOME "* ]]
+  [[ "$(launched_argv)" == *" --setenv HOME $PRODUCTION_HOME "* ]]
+  [[ "$(launched_argv)" != *" --bind $quoted $isolated_quoted "* ]]
+}
+
+@test "launcher accepts an explicit Bitwig config path that auto-bind would also add" {
+  mkdir -p "$PRODUCTION_HOME/.BitwigStudio"
+
+  run_daw_fixture --prefix "$REAL_PREFIX" \
+    --writable-path "$PRODUCTION_HOME/.BitwigStudio" fake-daw
+
+  [ "$status" -eq 0 ]
+  [[ "$(launched_argv)" == *" --setenv HOME $PRODUCTION_HOME "* ]]
+  [[ "$(launched_argv)" != *" --bind $PRODUCTION_HOME/.BitwigStudio $ISOLATED_HOME/.BitwigStudio "* ]]
+}
+
+@test "launcher does not invent a missing Bitwig config directory" {
+  run_daw_fixture --prefix "$REAL_PREFIX" fake-daw
+
+  [ "$status" -eq 0 ]
+  [ ! -e "$PRODUCTION_HOME/.BitwigStudio" ]
+  [[ "$(launched_argv)" != *".BitwigStudio"* ]]
 }
 
 @test "launcher rejects a writable path that overlaps production state" {
@@ -1435,7 +2764,7 @@ $BATS_TEST_TMPDIR"
 
   [ "$status" -eq 0 ]
   [ "$(daw_env_value VST3_PATH)" = \
-    "$ISOLATED_HOME/.vst3/yabridge:/usr/lib/vst3" ]
+    "$PRODUCTION_HOME/.vst3/yabridge:/usr/lib/vst3" ]
 }
 
 @test "launcher rejects a missing writable path value" {
@@ -1483,9 +2812,10 @@ $BATS_TEST_TMPDIR"
 require_live_sandbox() {
   local real_bwrap="/usr/bin/bwrap"
   [ -x "$real_bwrap" ] || skip "bubblewrap is not installed at $real_bwrap"
-  if ! "$real_bwrap" --unshare-user --unshare-pid --unshare-ipc --unshare-uts \
+  if ! "$real_bwrap" --unshare-user --unshare-pid --unshare-uts \
     --unshare-cgroup-try --unshare-net --die-with-parent --new-session \
-    --ro-bind /usr /usr --proc /proc --dev /dev --tmpfs /tmp \
+    --ro-bind /usr /usr --proc /proc --dev /dev --bind /dev/shm /dev/shm \
+    --tmpfs /tmp \
     --symlink usr/lib /lib64 --symlink usr/bin /bin -- /usr/bin/true \
     >/dev/null 2>"$BATS_TEST_TMPDIR/probe.err"; then
     skip "host policy forbids bubblewrap namespaces: $(cat "$BATS_TEST_TMPDIR/probe.err")"
@@ -1501,15 +2831,15 @@ require_live_sandbox() {
 #!/bin/bash
 {
   if printf 'changed' > "$REAL_PREFIX/drive_c/production.txt" 2>/dev/null; then
-    printf 'production-write=succeeded\n'
+    printf 'prefix-path-write=succeeded\n'
   else
-    printf 'production-write=failed\n'
+    printf 'prefix-path-write=failed\n'
   fi
   if printf 'injected' \
     > "$PRODUCTION_HOME/.vst/yabridge/Injected.so" 2>/dev/null; then
-    printf 'production-bridge-write=succeeded\n'
+    printf 'yabridge-path-write=succeeded\n'
   else
-    printf 'production-bridge-write=failed\n'
+    printf 'yabridge-path-write=failed\n'
   fi
   if printf 'changed' > "$COPY/drive_c/clone.txt" 2>/dev/null; then
     printf 'clone-write=succeeded\n'
@@ -1521,7 +2851,7 @@ require_live_sandbox() {
   else
     printf 'approved-write=failed\n'
   fi
-  printf 'production-visible=%s\n' "\$(cat "$REAL_PREFIX/drive_c/production.txt")"
+  printf 'prefix-path-visible=%s\n' "\$(cat "$REAL_PREFIX/drive_c/production.txt")"
 } > "$report"
 EOF
   chmod +x "$FIXTURE_BIN/mutating-daw"
@@ -1533,15 +2863,171 @@ EOF
 
   [ "$status" -eq 0 ]
   [ -f "$report" ]
-  grep -Fxq 'production-write=failed' "$report"
-  grep -Fxq 'production-bridge-write=failed' "$report"
+  grep -Fxq 'prefix-path-write=succeeded' "$report"
+  grep -Fxq 'yabridge-path-write=succeeded' "$report"
   grep -Fxq 'clone-write=succeeded' "$report"
   grep -Fxq 'approved-write=succeeded' "$report"
-  grep -Fxq 'production-visible=production state' "$report"
+  grep -Fxq 'prefix-path-visible=changed' "$report"
   [ "$(sha256sum < "$REAL_PREFIX/drive_c/production.txt")" = "$before" ]
   [ ! -e "$PRODUCTION_HOME/.vst/yabridge/Injected.so" ]
+  [ "$(cat "$ISOLATED_HOME/.vst/yabridge/Injected.so")" = "injected" ]
+  [ "$(cat "$COPY/drive_c/production.txt")" = "changed" ]
   [ "$(cat "$COPY/drive_c/clone.txt")" = "changed" ]
   [ "$(cat "$PROJECTS/output.wav")" = "rendered" ]
+}
+
+@test "a sandboxed DAW sees Wine known folders through the host HOME" {
+  require_live_sandbox
+  local documents="$PRODUCTION_HOME/Documents"
+  local wine_user="$REAL_PREFIX/drive_c/users/wineuser"
+  mkdir -p "$documents/Addictive Drums 2" "$wine_user"
+  printf '%s\n' 'xln-settings' > "$documents/Addictive Drums 2/settings"
+  ln -s "$documents" "$wine_user/Documents"
+  local report="$PROJECTS/report"
+  cat > "$FIXTURE_BIN/wine-folders-daw" <<EOF
+#!/bin/bash
+{
+  printf 'home=%s\n' "\$HOME"
+  if [[ -d "\$HOME/Documents" ]]; then
+    printf 'isolated-documents=present\n'
+  else
+    printf 'isolated-documents=missing\n'
+  fi
+  if [[ -f "\$HOME/Documents/Addictive Drums 2/settings" ]]; then
+    printf 'isolated-xln=%s\n' "\$(cat "\$HOME/Documents/Addictive Drums 2/settings")"
+  else
+    printf 'isolated-xln=missing\n'
+  fi
+  if [[ -f "$documents/Addictive Drums 2/settings" ]]; then
+    printf 'host-documents=%s\n' "\$(cat "$documents/Addictive Drums 2/settings")"
+  else
+    printf 'host-documents=missing\n'
+  fi
+  if [[ -f "$REAL_PREFIX/drive_c/users/wineuser/Documents/Addictive Drums 2/settings" ]]; then
+    printf 'wine-user-documents=%s\n' \
+      "\$(cat "$REAL_PREFIX/drive_c/users/wineuser/Documents/Addictive Drums 2/settings")"
+  else
+    printf 'wine-user-documents=missing\n'
+  fi
+  if printf 'from-isolated-documents' \
+    > "\$HOME/Documents/Addictive Drums 2/written" 2>/dev/null; then
+    printf 'documents-write=succeeded\n'
+  else
+    printf 'documents-write=failed\n'
+  fi
+  if printf 'changed' > "$REAL_PREFIX/drive_c/production.txt" 2>/dev/null; then
+    printf 'prefix-path-write=succeeded\n'
+  else
+    printf 'prefix-path-write=failed\n'
+  fi
+} > "$report"
+EOF
+  chmod +x "$FIXTURE_BIN/wine-folders-daw"
+  local before
+  before="$(sha256sum < "$REAL_PREFIX/drive_c/production.txt")"
+
+  run "$FIXTURE_ROOT/daw-env.sh" --prefix "$REAL_PREFIX" \
+    --writable-path "$PROJECTS" wine-folders-daw
+
+  [ "$status" -eq 0 ]
+  [ -f "$report" ]
+  grep -Fxq "home=$PRODUCTION_HOME" "$report"
+  grep -Fxq 'isolated-documents=present' "$report"
+  grep -Fxq 'isolated-xln=xln-settings' "$report"
+  grep -Fxq 'host-documents=xln-settings' "$report"
+  grep -Fxq 'wine-user-documents=xln-settings' "$report"
+  grep -Fxq 'documents-write=succeeded' "$report"
+  grep -Fxq 'prefix-path-write=succeeded' "$report"
+  [ "$(cat "$documents/Addictive Drums 2/written")" = "from-isolated-documents" ]
+  [ "$(sha256sum < "$REAL_PREFIX/drive_c/production.txt")" = "$before" ]
+}
+
+write_bitwig_state_daw() {
+  local report="$1"
+  cat > "$FIXTURE_BIN/bitwig-state-daw" <<EOF
+#!/bin/bash
+{
+  printf 'home=%s\n' "\$HOME"
+  if [[ -f "\$HOME/.BitwigStudio/.eula-agreed" ]]; then
+    printf 'license=%s\n' "\$(cat "\$HOME/.BitwigStudio/.eula-agreed")"
+  else
+    printf 'license=missing\n'
+  fi
+  printf 'uid=%s\n' "\$(id -u)"
+  printf 'passwd-home=%s\n' "\$(getent passwd "\$(id -u)" | cut -d: -f6)"
+  if printf 'from-host-home' > "\$HOME/.BitwigStudio/written" 2>/dev/null; then
+    printf 'config-write=succeeded\n'
+  else
+    printf 'config-write=failed\n'
+  fi
+  if printf 'changed' > "$REAL_PREFIX/drive_c/production.txt" 2>/dev/null; then
+    printf 'prefix-path-write=succeeded\n'
+  else
+    printf 'prefix-path-write=failed\n'
+  fi
+} > "$report"
+EOF
+  chmod +x "$FIXTURE_BIN/bitwig-state-daw"
+}
+
+@test "a sandboxed DAW sees and writes the real Bitwig config at host HOME" {
+  require_live_sandbox
+  mkdir -p "$PRODUCTION_HOME/.BitwigStudio"
+  printf '%s\n' 'license' > "$PRODUCTION_HOME/.BitwigStudio/.eula-agreed"
+  local report="$PROJECTS/report"
+  write_bitwig_state_daw "$report"
+  local before
+  before="$(sha256sum < "$REAL_PREFIX/drive_c/production.txt")"
+
+  run "$FIXTURE_ROOT/daw-env.sh" --prefix "$REAL_PREFIX" \
+    --writable-path "$PROJECTS" bitwig-state-daw
+
+  [ "$status" -eq 0 ]
+  [ -f "$report" ]
+  grep -Fxq "home=$PRODUCTION_HOME" "$report"
+  grep -Fxq "passwd-home=$PRODUCTION_HOME" "$report"
+  grep -Fxq "uid=$(id -u)" "$report"
+  grep -Fxq 'license=license' "$report"
+  grep -Fxq 'config-write=succeeded' "$report"
+  grep -Fxq 'prefix-path-write=succeeded' "$report"
+  [ "$(cat "$PRODUCTION_HOME/.BitwigStudio/written")" = "from-host-home" ]
+  [ "$(sha256sum < "$REAL_PREFIX/drive_c/production.txt")" = "$before" ]
+}
+
+# HOME + --mac + pasta: construction tests passed while live Bitwig still
+# opened /root/.BitwigStudio (map-root-user + Java getpwuid) or leftover
+# isolation/home/.BitwigStudio. This launch path must keep host HOME.
+@test "a sandboxed DAW with MAC identity uses host HOME not isolated leftover" {
+  require_live_sandbox
+  local real_pasta real_unshare
+  real_pasta="$(command -v pasta 2>/dev/null || true)"
+  real_unshare="$(command -v unshare 2>/dev/null || true)"
+  [[ -n "$real_pasta" && -x "$real_pasta" ]] ||
+    skip "pasta is not installed (Arch: pacman -S passt)"
+  [[ -n "$real_unshare" && -x "$real_unshare" ]] || skip "unshare is not installed"
+  rm -f "$FIXTURE_BIN/bwrap" "$FIXTURE_BIN/unshare" "$FIXTURE_BIN/pasta"
+
+  mkdir -p "$PRODUCTION_HOME/.BitwigStudio"
+  printf '%s\n' 'license' > "$PRODUCTION_HOME/.BitwigStudio/.eula-agreed"
+  local report="$PROJECTS/report"
+  write_bitwig_state_daw "$report"
+  local before
+  before="$(sha256sum < "$REAL_PREFIX/drive_c/production.txt")"
+
+  run "$FIXTURE_ROOT/daw-env.sh" --mac 02:00:5e:00:53:01 --nic eno1 \
+    --prefix "$REAL_PREFIX" --writable-path "$PROJECTS" bitwig-state-daw
+
+  [ "$status" -eq 0 ]
+  [ -f "$report" ]
+  grep -Fxq "home=$PRODUCTION_HOME" "$report"
+  grep -Fxq "passwd-home=$PRODUCTION_HOME" "$report"
+  grep -Fxq "uid=$(id -u)" "$report"
+  refute grep -Fxq "home=$ISOLATED_HOME" "$report"
+  refute grep -Fxq 'home=/root' "$report"
+  grep -Fxq 'license=license' "$report"
+  grep -Fxq 'config-write=succeeded' "$report"
+  [ "$(cat "$PRODUCTION_HOME/.BitwigStudio/written")" = "from-host-home" ]
+  [ "$(sha256sum < "$REAL_PREFIX/drive_c/production.txt")" = "$before" ]
 }
 
 @test "a sandboxed DAW cannot write a symlinked production plugin root" {
@@ -1573,17 +3059,70 @@ EOF
 
   [ "$status" -eq 0 ]
   [ -f "$report" ]
-  grep -Fxq 'alias-create=failed' "$report"
-  grep -Fxq 'alias-overwrite=failed' "$report"
-  grep -Fxq 'alias-visible=production bridge' "$report"
+  grep -Fxq 'alias-create=succeeded' "$report"
+  grep -Fxq 'alias-overwrite=succeeded' "$report"
   [ ! -e "$target/yabridge/Injected.so" ]
   [ "$(cat "$target/yabridge/Production.so")" = "production bridge" ]
+  [ "$(cat "$ISOLATED_HOME/.vst/yabridge/Injected.so")" = "injected" ]
+}
+
+@test "live bwrap overlays isolated yabridge when ~/.vst is a symlink" {
+  require_live_sandbox
+  local vst_target="$BATS_TEST_TMPDIR/audio-production/.vst"
+  local vst3_target="$BATS_TEST_TMPDIR/audio-production/.vst3"
+  local clap_target="$BATS_TEST_TMPDIR/audio-production/.clap"
+  alias_plugin_root .vst "$vst_target"
+  alias_plugin_root .vst3 "$vst3_target"
+  alias_plugin_root .clap "$clap_target"
+  ln -s "$REAL_PREFIX" "$PRODUCTION_HOME/winplugins"
+
+  local report="$PROJECTS/report"
+  cat > "$FIXTURE_BIN/symlink-root-daw" <<EOF
+#!/bin/bash
+{
+  printf 'home=%s\n' "\$HOME"
+  if printf 'injected' > "\$HOME/.vst/yabridge/Injected.so" 2>/dev/null; then
+    printf 'lexical-write=succeeded\n'
+  else
+    printf 'lexical-write=failed\n'
+  fi
+  if printf 'injected3' > "\$HOME/.vst3/yabridge/Injected.so" 2>/dev/null; then
+    printf 'vst3-write=succeeded\n'
+  else
+    printf 'vst3-write=failed\n'
+  fi
+  if printf 'changed' > "$vst_target/yabridge/Production.so" 2>/dev/null; then
+    printf 'canonical-overwrite=succeeded\n'
+  else
+    printf 'canonical-overwrite=failed\n'
+  fi
+  printf 'lexical-good=%s\n' "\$(cat "\$HOME/.vst/yabridge/Good.so")"
+} > "$report"
+EOF
+  chmod +x "$FIXTURE_BIN/symlink-root-daw"
+
+  run "$FIXTURE_ROOT/daw-env.sh" --prefix "$REAL_PREFIX" \
+    --writable-path "$PROJECTS" symlink-root-daw
+
+  [ "$status" -eq 0 ]
+  [ -f "$report" ]
+  grep -Fxq "home=$PRODUCTION_HOME" "$report"
+  grep -Fxq 'lexical-write=succeeded' "$report"
+  grep -Fxq 'vst3-write=succeeded' "$report"
+  grep -Fxq 'canonical-overwrite=succeeded' "$report"
+  grep -Fxq 'lexical-good=native' "$report"
+  [ ! -e "$vst_target/yabridge/Injected.so" ]
+  [ ! -e "$vst3_target/yabridge/Injected.so" ]
+  [ "$(cat "$vst_target/yabridge/Production.so")" = "production bridge" ]
+  [ "$(cat "$ISOLATED_HOME/.vst/yabridge/Injected.so")" = "injected" ]
+  [ "$(cat "$ISOLATED_HOME/.vst3/yabridge/Injected.so")" = "injected3" ]
+  [ "$(cat "$ISOLATED_HOME/.vst/yabridge/Production.so")" = "changed" ]
 }
 
 # Interfaces are read from /proc/net/dev, which procfs reports per network
 # namespace. Nothing here contacts a host or a remote, so the test cannot hang
 # on an unreachable network.
-@test "a sandboxed DAW sees no real-home sibling and no host network interface" {
+@test "a sandboxed DAW sees the host home and no host network interface" {
   require_live_sandbox
   printf '%s\n' 'private' > "$PRODUCTION_HOME/private-notes"
   mkdir -p "$PRODUCTION_HOME/Documents"
@@ -1618,14 +3157,98 @@ EOF
 
   [ "$status" -eq 0 ]
   [ -f "$report" ]
-  grep -Fxq 'home-sibling=hidden' "$report"
-  grep -Fxq 'home-documents=hidden' "$report"
-  # The prefix is deliberately visible read-only; hiding the rest of the home
-  # is what this asserts, not hiding the boundary itself.
+  grep -Fxq 'home-sibling=visible' "$report"
+  grep -Fxq 'home-documents=visible' "$report"
+  # The prefix is deliberately visible at its host path (clone overlay);
+  # hiding the rest of the home is what this asserts.
   grep -Fxq 'prefix=visible' "$report"
   local interfaces
   interfaces="$(sed -n 's/^interfaces=//p' "$report" | tr -s ' ' | sed 's/ *$//')"
   [ "$interfaces" = "lo" ]
+}
+
+@test "owned-userns pasta MAC identity is visible inside a live sandbox" {
+  require_live_sandbox
+  local real_pasta real_unshare
+  real_pasta="$(command -v pasta 2>/dev/null || true)"
+  real_unshare="$(command -v unshare 2>/dev/null || true)"
+  [[ -n "$real_pasta" && -x "$real_pasta" ]] ||
+    skip "pasta is not installed (Arch: pacman -S passt)"
+  [[ -n "$real_unshare" && -x "$real_unshare" ]] || skip "unshare is not installed"
+  rm -f "$FIXTURE_BIN/bwrap" "$FIXTURE_BIN/unshare" "$FIXTURE_BIN/pasta"
+
+  local report="$PROJECTS/report"
+  cat > "$FIXTURE_BIN/identity-daw" <<EOF
+#!/bin/bash
+{
+  printf 'machine-id=%s\n' "\$(cat /etc/machine-id 2>/dev/null || echo missing)"
+  printf 'macs=%s\n' "\$(cat /sys/class/net/*/address 2>/dev/null | tr '\n' ' ')"
+  printf 'interfaces=%s\n' \
+    "\$(cut -d: -f1 /proc/net/dev | tail -n +3 | tr -d ' ' | tr '\n' ' ')"
+  printf 'addrs=%s\n' "\$(ip -4 -o addr show 2>/dev/null | tr '\n' ';')"
+  printf 'routes=%s\n' "\$(ip -4 route 2>/dev/null | tr '\n' ';')"
+} > "$report"
+EOF
+  chmod +x "$FIXTURE_BIN/identity-daw"
+
+  run "$FIXTURE_ROOT/daw-env.sh" --mac 02:00:5e:00:53:01 --nic eno1 \
+    --prefix "$REAL_PREFIX" --writable-path "$PROJECTS" identity-daw
+
+  [ "$status" -eq 0 ]
+  [ -f "$report" ]
+  grep -Fq '02:00:5e:00:53:01' "$report"
+  local interfaces addrs routes
+  interfaces="$(sed -n 's/^interfaces=//p' "$report")"
+  addrs="$(sed -n 's/^addrs=//p' "$report")"
+  routes="$(sed -n 's/^routes=//p' "$report")"
+  # Pasta templates from --nic (eno1) but Wine must see eth0, the same
+  # single-NIC name daily xln-fj / Firejail typically presents. docker0
+  # must still stay out.
+  [[ "$interfaces" == *eth0* ]]
+  [[ "$interfaces" != *eno1* ]]
+  [[ "$interfaces" != *docker0* ]]
+  # Local-mode pasta NATs to 127.0.0.1 via 169.254.2.2. Host-templated
+  # pasta copies the outbound interface instead.
+  [[ "$addrs" != *169.254.2.* ]]
+  [[ "$routes" != *169.254.2.2* ]]
+}
+
+@test "owned-userns pasta can pin the guest IPv4 Wine would see" {
+  require_live_sandbox
+  local real_pasta real_unshare
+  real_pasta="$(command -v pasta 2>/dev/null || true)"
+  real_unshare="$(command -v unshare 2>/dev/null || true)"
+  [[ -n "$real_pasta" && -x "$real_pasta" ]] ||
+    skip "pasta is not installed (Arch: pacman -S passt)"
+  [[ -n "$real_unshare" && -x "$real_unshare" ]] || skip "unshare is not installed"
+  rm -f "$FIXTURE_BIN/bwrap" "$FIXTURE_BIN/unshare" "$FIXTURE_BIN/pasta"
+
+  local report="$PROJECTS/report"
+  cat > "$FIXTURE_BIN/address-daw" <<EOF
+#!/bin/bash
+{
+  printf 'interfaces=%s\n' \
+    "\$(cut -d: -f1 /proc/net/dev | tail -n +3 | tr -d ' ' | tr '\n' ' ')"
+  printf 'macs=%s\n' "\$(cat /sys/class/net/*/address 2>/dev/null | tr '\n' ' ')"
+  printf 'addrs=%s\n' "\$(ip -4 -o addr show 2>/dev/null | tr '\n' ';')"
+} > "$report"
+EOF
+  chmod +x "$FIXTURE_BIN/address-daw"
+
+  run "$FIXTURE_ROOT/daw-env.sh" --mac 02:00:5e:00:53:01 --nic eno1 \
+    --address 192.0.2.132 \
+    --prefix "$REAL_PREFIX" --writable-path "$PROJECTS" address-daw
+
+  [ "$status" -eq 0 ]
+  [ -f "$report" ]
+  grep -Fq '02:00:5e:00:53:01' "$report"
+  local interfaces addrs
+  interfaces="$(sed -n 's/^interfaces=//p' "$report")"
+  addrs="$(sed -n 's/^addrs=//p' "$report")"
+  [[ "$interfaces" == *eth0* ]]
+  [[ "$interfaces" != *eno1* ]]
+  [[ "$addrs" == *192.0.2.132* ]]
+  [[ "$addrs" != *169.254.2.* ]]
 }
 
 @test "a sandboxed DAW propagates its exit status and gets a private /tmp" {

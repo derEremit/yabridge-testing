@@ -419,6 +419,31 @@ run_manifest_bridge_roots() {
     done
 }
 
+# After `--`, the recorded DAW must run. wine-wait.sh wine ARGS is the
+# one allowed wrapper: XLN self-restarts and wineserver -w keeps the
+# sandbox up. The wrapper path must be lib/wine-wait.sh.
+run_manifest_command_runs_daw() {
+    local separator="$1"
+    local total="$2"
+    local daw="$3"
+    local -n __run_manifest_argv="$4"
+    local cmd wait_script
+
+    if [[ "$((separator + 1))" -ge "$total" ]]; then
+        return 1
+    fi
+    cmd="${__run_manifest_argv[separator + 1]}"
+    [[ "$cmd" == "$daw" ]] && return 0
+    if [[ "$((separator + 2))" -ge "$total" ]]; then
+        return 1
+    fi
+    wait_script="$cmd"
+    [[ "$(basename -- "$wait_script")" == wine-wait.sh ]] || return 1
+    [[ "$wait_script" == */lib/wine-wait.sh ]] || return 1
+    [[ -f "$wait_script" && ! -L "$wait_script" ]] || return 1
+    [[ "${__run_manifest_argv[separator + 2]}" == "$daw" ]]
+}
+
 # The finished argv, checked against the policy the manifest is about to claim.
 # Only the arguments before the command separator are policy; everything after
 # it belongs to the DAW and may look like anything at all.
@@ -463,8 +488,8 @@ run_manifest_verify_command() {
         run_manifest_error "the sandbox command has no command separator; refusing to record it"
         return 1
     fi
-    if [[ "$((separator + 1))" -ge "$total" ||
-        "${__run_manifest_command[separator + 1]}" != "$daw" ]]; then
+    if ! run_manifest_command_runs_daw \
+        "$separator" "$total" "$daw" "$1"; then
         run_manifest_error "the sandbox command does not execute the recorded DAW: $daw"
         return 1
     fi

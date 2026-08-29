@@ -198,22 +198,20 @@ With the DAW running:
 
 ## Submitting results
 
-### Automated submission
+Every path creates a **draft** and prints a secret `/complete/{token}` URL.
+Edit notes, plugins, and the verdict on that page, then Publish. The harness
+never POSTs `/api/v1/results` and never auto-publishes.
 
 ```bash
-yabridge-test suite --submit
-```
-
-Probe `measurements` (including `classification` and raw assertions) round-trip
-through the results API.
-
-### Manual submission
-
-```bash
+./test.sh submit --session
+./test.sh suite --submit
+./test.sh probe --submit
 yabridge-test suite --output results.json
-# edit the saved report notes if needed
 yabridge-test submit --file results.json
 ```
+
+Probe `measurements` (coordinates, classifications, assertions) round-trip
+through the draft. Paths, log tails, and prefix locations are stripped first.
 
 Include:
 

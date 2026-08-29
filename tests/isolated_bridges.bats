@@ -84,11 +84,16 @@ if [[ "${1:-}" == set ]]; then
   exit 101
 fi
 if [[ "${1:-}" == add ]]; then
+  # Real yabridgectl 5.1.1 accepts exactly one path. Batching walk roots
+  # into a single add is the production failure this fixture reproduces.
+  if [[ $# -ne 2 ]]; then
+    echo "error: unexpected argument '${3:-}' found" >&2
+    echo "Usage: yabridgectl add <path>" >&2
+    exit 2
+  fi
   # Each walk root is logged on its own line so a path that merely prefixes
   # another (the clone root vs drive_c/Program Files) cannot hide as a match.
-  for add_root in "${@:2}"; do
-    printf 'add-root=%s\n' "$add_root" >> "$YABRIDGECTL_CALLS"
-  done
+  printf 'add-root=%s\n' "$2" >> "$YABRIDGECTL_CALLS"
 fi
 if [[ "${1:-}" == sync ]]; then
   if [[ "${YABRIDGECTL_FAIL_SYNC:-false}" == true ]]; then
@@ -245,10 +250,12 @@ sync_call_count() {
   copy_real="$(realpath -e -- "$COPY")"
   grep -Fxq "yabridge_home = '$(realpath -e -- "$YABRIDGE_HOME")'" \
     "$ISOLATED_HOME/.config/yabridgectl/config.toml"
+  grep -Fxq "add $copy_real/drive_c/Program Files" "$CALLS"
+  grep -Fxq "add $copy_real/drive_c/Program Files (x86)" "$CALLS"
   grep -Fxq "add-root=$copy_real/drive_c/Program Files" "$CALLS"
   grep -Fxq "add-root=$copy_real/drive_c/Program Files (x86)" "$CALLS"
   grep -Fxq "sync --force --prune" "$CALLS"
-  [ "$(grep -c '^add ' "$CALLS")" -eq 1 ]
+  [ "$(grep -c '^add ' "$CALLS")" -eq 2 ]
   refute grep -Fxq "add-root=$copy_real" "$CALLS"
   refute grep -Fxq "add $copy_real" "$CALLS"
   refute grep -Fq "$SOURCE" "$CALLS"
@@ -893,10 +900,11 @@ HOOK
   run_daw_fixture --prefix "$SOURCE" fake-daw
 
   [ "$status" -eq 0 ]
-  [ "$(daw_env_value VST_PATH)" = "$ISOLATED_HOME/.vst/yabridge" ]
-  [ "$(daw_env_value VST3_PATH)" = "$ISOLATED_HOME/.vst3/yabridge" ]
-  [ "$(daw_env_value CLAP_PATH)" = "$ISOLATED_HOME/.clap/yabridge" ]
+  [ "$(daw_env_value VST_PATH)" = "$PRODUCTION_HOME/.vst/yabridge" ]
+  [ "$(daw_env_value VST3_PATH)" = "$PRODUCTION_HOME/.vst3/yabridge" ]
+  [ "$(daw_env_value CLAP_PATH)" = "$PRODUCTION_HOME/.clap/yabridge" ]
   refute grep -Fq 'nonexistent-production' "$DAW_ENV_FILE"
+  refute grep -Fq "$ISOLATED_HOME/.vst/yabridge" "$DAW_ENV_FILE"
 }
 
 @test "launcher appends only explicitly supplied native plugin paths" {
@@ -910,16 +918,18 @@ HOOK
 
   [ "$status" -eq 0 ]
   [ "$(daw_env_value VST_PATH)" = \
-    "$ISOLATED_HOME/.vst/yabridge:$BATS_TEST_TMPDIR/native-a:$BATS_TEST_TMPDIR/native-b" ]
+    "$PRODUCTION_HOME/.vst/yabridge:$BATS_TEST_TMPDIR/native-a:$BATS_TEST_TMPDIR/native-b" ]
   [ "$(daw_env_value VST3_PATH)" = \
-    "$ISOLATED_HOME/.vst3/yabridge:$BATS_TEST_TMPDIR/native-a:$BATS_TEST_TMPDIR/native-b" ]
+    "$PRODUCTION_HOME/.vst3/yabridge:$BATS_TEST_TMPDIR/native-a:$BATS_TEST_TMPDIR/native-b" ]
   [ "$(daw_env_value CLAP_PATH)" = \
-    "$ISOLATED_HOME/.clap/yabridge:$BATS_TEST_TMPDIR/native-a:$BATS_TEST_TMPDIR/native-b" ]
+    "$PRODUCTION_HOME/.clap/yabridge:$BATS_TEST_TMPDIR/native-a:$BATS_TEST_TMPDIR/native-b" ]
 }
 
-# The plugin paths handed to the DAW are the whole point of the isolation: a
-# production yabridge directory on VST_PATH would put production bridges back
-# in front of the DAW no matter what the sandbox mounts say.
+# --native-plugin-path must still refuse a production yabridge directory.
+# VST_PATH uses the production path string so Bitwig keeps its indexed
+# locations, and the sandbox overlays isolated bridges there. Naming the
+# production directory as an extra native path would bind those production
+# bridges without that overlay.
 @test "a production yabridge directory can never reach VST_PATH" {
   good_sync_hook
   mkdir -p "$PRODUCTION_HOME/.vst/yabridge"
@@ -1020,7 +1030,7 @@ HOOK
   run_daw_fixture --allow-empty --prefix "$SOURCE" fake-daw
 
   [ "$status" -eq 0 ]
-  [ "$(daw_env_value VST_PATH)" = "$ISOLATED_HOME/.vst/yabridge" ]
+  [ "$(daw_env_value VST_PATH)" = "$PRODUCTION_HOME/.vst/yabridge" ]
 }
 
 @test "clean removes the isolated bridge tree that the launcher generated" {

@@ -8,6 +8,7 @@ LAUNCHER_LIBRARIES=(
   clone-state.sh
   isolated-bridges.sh
   sandbox.sh
+  mac-netns-exec.sh
   run-manifest.sh
 )
 

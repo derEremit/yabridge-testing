@@ -147,6 +147,29 @@ write_provenance() {
   [[ "$output" != *"belongs to a different source prefix"* ]]
 }
 
+# Kernel device numbers move across remounts and btrfs anonymous devices.
+# Path + inode still name the same daily prefix; refusing that pair as a
+# "different source" leaves a good clone stranded and points at rm -rf.
+@test "clone validation accepts the same source after st_dev changes" {
+  source "$PROJECT_ROOT/lib/clone-state.sh"
+  local clone="$FIXTURE_ROOT/prefix-copy"
+  local device inode
+  make_prefix "$clone"
+  write_provenance "$clone" "$SOURCE"
+  read -r device inode <<< "$(source_identity "$SOURCE")"
+  printf '%s\n%s\n%s\n' "$(realpath "$SOURCE")" "99999" "$inode" \
+    > "$clone/.yabridge-staging-source"
+
+  run validate_clone_provenance "$clone" "$(realpath "$SOURCE")"
+
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"belongs to a different source prefix"* ]]
+  mapfile -t provenance < "$clone/.yabridge-staging-source"
+  [ "${provenance[0]}" = "$(realpath "$SOURCE")" ]
+  [ "${provenance[1]}" = "$device" ]
+  [ "${provenance[2]}" = "$inode" ]
+}
+
 @test "launcher records canonical source provenance after a successful clone" {
   local canonical device inode
   canonical="$(realpath "$SOURCE")"
@@ -155,7 +178,7 @@ write_provenance() {
   run_daw_fixture --prefix "$SOURCE" fake-daw
 
   [ "$status" -eq 0 ]
-  [ "$(cat "$DAW_PREFIX")" = "$FIXTURE_ROOT/prefix-copy" ]
+  [ "$(cat "$DAW_PREFIX")" = "$(realpath "$SOURCE")" ]
   mapfile -t provenance < "$FIXTURE_ROOT/prefix-copy/.yabridge-staging-source"
   [ "${provenance[0]}" = "$canonical" ]
   [ "${provenance[1]}" = "$device" ]
@@ -165,6 +188,20 @@ write_provenance() {
 @test "launcher reuses only a clone with matching source provenance" {
   run_daw_fixture --prefix "$SOURCE" fake-daw
   [ "$status" -eq 0 ]
+
+  run_daw_fixture --prefix "$SOURCE" fake-daw
+
+  [ "$status" -eq 0 ]
+  [ "$(wc -l < "$CALLS")" -eq 1 ]
+}
+
+@test "launcher reuses a clone when only the source device number changed" {
+  local inode
+  run_daw_fixture --prefix "$SOURCE" fake-daw
+  [ "$status" -eq 0 ]
+  read -r _ inode <<< "$(source_identity "$SOURCE")"
+  printf '%s\n%s\n%s\n' "$(realpath "$SOURCE")" "99999" "$inode" \
+    > "$FIXTURE_ROOT/prefix-copy/.yabridge-staging-source"
 
   run_daw_fixture --prefix "$SOURCE" fake-daw
 
@@ -338,7 +375,7 @@ write_provenance() {
   [[ "$output" == *" GB"* ]]
   [[ "$output" =~ about\ [0-9]+\.[0-9]+\ GB ]]
   [ -f "$FIXTURE_ROOT/prefix-copy/payload.bin" ]
-  [ "$(cat "$DAW_PREFIX")" = "$FIXTURE_ROOT/prefix-copy" ]
+  [ "$(cat "$DAW_PREFIX")" = "$(realpath "$SOURCE")" ]
   local copy_argv
   copy_argv="$(cat "$CALLS")"
   [[ "$copy_argv" == *$'\n'* ]]

@@ -54,6 +54,10 @@ isolation. No system files are touched — everything lives in `build/`,
 ├── ansible/          # provisioning
 ├── install.sh        # bootstrap clone/tarball
 ├── docs/
+│   ├── xln-isolated-installer.md  # clone-only XLN installer (2026-08-29 success)
+│   ├── coord-probe.md
+│   ├── getting-started.md
+│   └── test-protocol.md
 └── tests/
 ```
 
@@ -137,8 +141,15 @@ isolated wine + yabridge. Your system yabridge is never touched.
 ./test.sh probe --scenario offset --samples 3 --json
 ./test.sh validate          # pointer prerequisite + bridged coordinate matrix
 ./test.sh suite             # full test suite
-./test.sh plugin ~/foo.vst3 # test a specific plugin
+./test.sh plugin /path/to/plugin.vst3
+./test.sh submit --session  # draft an isolated-DAW report; prints an edit URL
 ```
+
+`submit` (and `suite --submit` / `probe --submit`) POSTs a sanitized draft to
+the public results site and prints a secret edit link. Fill notes, plugins,
+and the verdict there, then Publish. Home paths are stripped before HTTP.
+`--dry-run` prints the payload and does not POST. Session-specific operator
+notes stay in gitignored `run-state/` and are not this repository.
 
 The deterministic coordinate probe is a Windows CLAP fixture exercised first
 under pure Wine and then through yabridge. It uses temporary Wine prefixes and
@@ -154,13 +165,55 @@ measurements, and troubleshooting are documented in
 
 ### Launch a DAW against a COW clone of your real prefix
 
-`daw-env.sh` runs your DAW with wine 11.8 + test yabridge, pointed at a
-**copy-on-write clone** of your real Wine prefix, inside a Bubblewrap sandbox
-where your production state is mounted read-only.
+#### Isolated Bitwig / XLN status (2026-08-29)
+
+Do not start the next session from zero. Do not `--fresh` or
+`rm prefix-copy`. Full installer procedure, failure ladder, and path
+map: [Isolated XLN Online Installer](./docs/xln-isolated-installer.md).
+Human notes: `run-state/last-run-notes.md`.
+
+**Installer (2026-08-29 ~01:54) — success.** Cotton 4.7.3 from
+Program Files on the **clone**, account the operator XLN account (`XLN_ACCOUNT` in `run-state/identity.env`), two in-app
+restarts inside one sandbox (`wine-wait.sh` / `wineserver -w`), then
+**Installation Finished / Everything is up to date**. ComputerId
+`7ea3094c9b32`. Production prefix Program Files stayed 4.7.2.
+
+**Bitwig + AD2 (2026-08-29 ~02:00) — success.** Same clone and pasta
+identity as the installer (`--mac "$XLN_MAC" --nic "$XLN_NIC"
+--address "$XLN_ADDR"`). Addictive Drums 2 authorized; **WRONG
+COMPUTER ID** resolved for this isolated run. Pasta is still NAT, not
+Firejail macvlan; that was enough after clone-only installer authorize.
+Do not `--fresh`. Earlier Bitwig (2026-08-28): real `~/.BitwigStudio`,
+197 isolated bridges, Wine 11.16 Staging, yabridge master `b580a9f`,
+manifest `2026-08-28T19:42:41Z`.
+
+```bash
+# Clone-only installer (daw-env rewrites this path; two restarts are OK)
+./daw-env.sh --mac "$XLN_MAC" --nic "$XLN_NIC" --address "$XLN_ADDR" \
+  --writable-path "$(realpath -- "$BITWIG_PROJECTS")" \
+  "$PWD/build/wine/bin/wine" \
+  "C:\\ProgramData\\XLN Audio\\Temp\\App\\Cotton XLN Online Installer\\updateBinary\\XLN Online Installer.exe"
+
+# Bitwig after that (same identity)
+./daw-env.sh --refresh-bridges --mac "$XLN_MAC" --nic "$XLN_NIC" \
+  --address "$XLN_ADDR" \
+  --writable-path "$(realpath -- "$BITWIG_PROJECTS")" \
+  bitwig-studio
+```
+
+`daw-env.sh` runs your DAW with the pinned wine-staging + test yabridge, pointed at a
+**copy-on-write clone** of your real Wine prefix, inside a Bubblewrap sandbox.
+Only the Wine prefix and yabridge bridges are isolated. The DAW's `HOME` is
+your **real login home**, so Bitwig opens `~/.BitwigStudio` (not
+`isolation/home/.BitwigStudio`, not `/root/.BitwigStudio`). Isolated XDG
+keeps yabridgectl from writing production config. Isolated runs write Bitwig
+settings and Wine known folders back to the host.
 
 Requires `bubblewrap` 0.11+ and a kernel that lets it create namespaces
-(unprivileged user namespaces, or a setuid `bwrap`). Without that, the launcher
-refuses to start your DAW rather than running it unsandboxed.
+(unprivileged user namespaces, or a setuid `bwrap`). `--mac` also needs
+`unshare` plus `pasta` (from the `passt` package; preferred) or
+`slirp4netns`. Without that, the launcher refuses to start your DAW rather
+than running it unsandboxed or silently dropping `--mac`.
 
 ```bash
 ./daw-env.sh reaper
@@ -177,6 +230,25 @@ refuses to start your DAW rather than running it unsandboxed.
 # Give the DAW host network access (off by default)
 ./daw-env.sh --network bitwig-studio
 
+# Recommended Bitwig launch (reuse the clone; omit --fresh unless you want a new one)
+./daw-env.sh --refresh-bridges --mac "$XLN_MAC" --nic "$XLN_NIC" \
+  --address "$XLN_ADDR" \
+  --writable-path "$(realpath -- "$BITWIG_PROJECTS")" \
+  bitwig-studio
+
+# XLN / AD2 Computer ID: pasta from the host, attached to a netns we own.
+# --address pins the guest IPv4 (re-check xln-fj; 2026-08-28 ~22:00 was .132).
+./daw-env.sh --mac "$XLN_MAC" --nic "$XLN_NIC" --address "$XLN_ADDR" \
+  bitwig-studio
+./daw-env.sh --writable-path "$(realpath -- "$HOME/Bitwig Studio")" \
+  ~/.local/bin/xln-fj bitwig-studio
+
+# Clone-only XLN Online Installer (authorizes prefix-copy, not production)
+./daw-env.sh --mac "$XLN_MAC" --nic "$XLN_NIC" --address "$XLN_ADDR" \
+  --writable-path "$(realpath -- "$BITWIG_PROJECTS")" \
+  "$PWD/build/wine/bin/wine" \
+  "C:\\Program Files\\XLN Audio\\XLN Online Installer\\XLN Online Installer.exe"
+
 # Silence Wine's own diagnostics (kept by default)
 ./daw-env.sh --quiet-wine reaper
 ```
@@ -188,13 +260,25 @@ refuses to start your DAW rather than running it unsandboxed.
    → `prefix-copy/`. On btrfs/XFS this is copy-on-write: instant, near-zero
    disk, and cloning only *reads* the original.
 3. Sources `env.sh` (wine 11.8 + test yabridge on `PATH`), then exports
-   `WINEPREFIX` → `prefix-copy/`.
-4. Generates yabridge bridges inside `isolation/home/`, an isolated HOME/XDG
-   tree that only references the clone.
-5. Builds a Bubblewrap argv array, then re-checks every identity the run
-   depends on and records it in `run-state/run-manifest.json`.
-6. `exec`s the sandbox. Your DAW arguments are passed through unchanged — no
-   shell re-parses them.
+   `WINEPREFIX` → `prefix-copy/` on the host.
+4. Generates yabridge bridges inside `isolation/home/`. Isolated generation
+   calls `yabridgectl add` **once per plugin directory** (so paths with
+   spaces stay one argument). Only the clone is registered.
+5. Builds a Bubblewrap argv array: the clone is bound **over** the production
+   prefix path so Bitwig keeps the VST/VST3/CLAP path strings it already
+   indexed; isolated yabridge overlays the resolved `~/.vst/yabridge`,
+   `~/.vst3/yabridge` and `~/.clap/yabridge` directories. A `~/winplugins` or
+   `~/.vst` symlink stays a symlink — Bubblewrap cannot mount onto one.
+   Inside the sandbox `WINEPREFIX` is that production path. Then it records
+   the run in `run-state/run-manifest.json`.
+6. Starts the DAW through Bubblewrap. Your DAW arguments are passed through
+   unchanged — no shell re-parses them. With `--mac`, the launcher
+   `unshare`s a user+net namespace it owns, starts `pasta --config-net
+   --mac-addr …` from the **host** netns (attached with `--userns` /
+   `--netns /proc/<pid>/ns/net`) or slirp4netns, then runs real `bwrap`
+   inside that netns (no `--unshare-net`, no cross-userns `nsenter`).
+   Starting pasta after `unshare --net` makes it fall back to 169.254
+   local-mode, which breaks XLN and other outbound plugin traffic.
 
 **Why this is safe:** the launcher refuses to start without `bwrap`.
 Production prefix and plugin roots are mounted read-only, and the bridges
@@ -205,11 +289,11 @@ Wine finds that clone; it is not the isolation boundary.
 
 **The chain:**
 ```
-generated .so in isolation/home/.vst/yabridge/ (VST_PATH, writable)
+generated .so at ~/.vst/yabridge (isolated tree overlaid on the host path)
   → finds yabridge-host.exe via PATH (our build/yabridge/ is first)
   → yabridge-host.exe wrapper reads $WINELOADER → wine 11.8
   → runs yabridge-host.exe.so with wine 11.8
-  → loads Windows plugin DLL, prefix forced to prefix-copy/ via $WINEPREFIX
+  → loads Windows plugin DLL; WINEPREFIX is the production path, clone overlaid
 ```
 
 ### The sandbox boundary
@@ -229,22 +313,57 @@ narrower ones.
 | display/audio sockets | read-only | only the specific X11, Wayland, PulseAudio or PipeWire socket that exists |
 | `$XAUTHORITY` | read-only | the one real-home input an X11 session needs |
 | project tree (this repo) | read-only | wine 11.8, test yabridge, `env.sh` |
-| production Wine prefix | **read-only** | never written, never upgraded |
-| `~/.vst`, `~/.vst3`, `~/.clap` | **read-only** | production bridges cannot be modified, and are not on any plugin path. A plugin root that is a symlink is exposed read-only at its canonical target, so storage elsewhere is protected under its real name too |
+| production Wine prefix (host) | **read-only** | never written, never upgraded. Inside the sandbox the clone is bound over this resolved path. A `~/winplugins` symlink stays a symlink and finds the overlay through that target |
+| `~/.vst`, `~/.vst3`, `~/.clap` | **read-only** outside yabridge | production bridges cannot be modified, and are not on any plugin path. Isolated `~/.vst/yabridge`, `~/.vst3/yabridge` and `~/.clap/yabridge` are overlaid writable from `isolation/home` onto the resolved directory. The `~/.vst` symlink (if any) stays a symlink so Bitwig still sees `~/.vst/yabridge` |
 | DAW install root, `--native-plugin-path` | read-only | the DAW's own files. A `bin` directory is widened to the install root beside it, but never inside your home — a DAW under `~/…/bin` gets that `bin` directory alone |
 | `run-state/` | read-only | inside the project tree, so the DAW cannot rewrite the record of its own run |
 | `prefix-copy/` | writable | the validated clone |
 | `isolation/` | writable | the isolated HOME/XDG and bridge tree |
-| `--writable-path DIR` | writable | your projects and rendered output |
+| `--writable-path DIR` | writable | your projects and rendered output. Paths under the login home are already visible because that home is bound as `HOME` |
+| real login `$HOME` | **writable** | Bitwig settings, Wine known folders, and the rest of your user data. `HOME` is this path. Isolated `isolation/home/.BitwigStudio` is not `HOME` and must not win |
+| `isolation/` XDG (`XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_CACHE_HOME`) | writable | yabridgectl and isolated bridges only. The DAW still uses `~/.BitwigStudio` under the real home |
 
-Everything else is absent. The real home is never bound as a whole — not even
-read-only — and `HOME`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_CACHE_HOME`
-and `XDG_RUNTIME_DIR` all point inside the sandbox. No D-Bus session socket is
+The production Wine prefix is overlaid with the clone; the resolved
+`~/.vst/yabridge`, `~/.vst3/yabridge` and `~/.clap/yabridge` directories are
+overlaid with isolated bridges.
+`--mac` keeps the login uid (and a files-only passwd whose home is the login
+home) so Bitwig Java `user.home` is not `/root`. No D-Bus session socket is
 exposed.
 
 **Network:** the sandbox gets its own empty network namespace. Pass
 `--network` to give the DAW the host network instead — for example for license
 activation — and nothing else changes.
+
+**XLN Computer ID / `--mac`:** Addictive Drums 2's "machine id" is the NIC MAC
+Wine sees, not `/etc/machine-id` (already the host's via the read-only `/etc`
+bind). Daily use runs `xln-fj` — Firejail `--net=$XLN_NIC --mac=$XLN_MAC`
+(macvlan on the host NIC). That Firejail path is a **dead end** inside daw-env:
+Firejail as a parent replaces `/usr/bin/bwrap` with `fbwrap`; Firejail
+*inside* bwrap silently drops `--mac`; and unprivileged `nsenter` into
+Firejail's netns fails (`EPERM`) because that netns lives in Firejail's
+own user namespace. `--mac` therefore creates a **user+net namespace we
+own**, starts `pasta --config-net --mac-addr <MAC>` (preferred) from the
+host netns — attached with `--userns /proc/<pid>/ns/user --netns
+/proc/<pid>/ns/net` so pasta still sees host routes — or `slirp4netns`
+with that MAC, then runs real `/usr/bin/bwrap` inside that userns+netns.
+bwrap must not `--unshare-net` or the MAC netns would be dropped. `--nic`
+is the host template (`pasta --interface`); Wine always sees one NIC named
+`eth0` (`pasta --ns-ifname eth0`), matching daily `xln-fj` / Firejail
+(which is `eth0` or `eth0-<pid>`). `--address ADDR` pins the guest IPv4
+(`pasta --address`); without it pasta copies the host template (NAT
+a different LAN IP on 2026-08-28). That is still userspace NAT, not Firejail
+macvlan L2 on the host NIC. Re-check `xln-fj`'s LAN IP before pinning — it
+moved from one LAN address to another. Starting pasta inside
+an empty `unshare --net` forces 169.254 local-mode. Passing
+`xln-fj` as the first argument unwraps it into the same identity. Do not
+wrap firejail as the sandboxed program. If pasta and slirp4netns are both
+missing, the launcher names `passt` / `pasta` rather than dropping `--mac`.
+`/etc/machine-id` already matches the host; Wine's `MachineGuid` is in
+the clone. MAC + `eth0` were not enough for AD2 on 2026-08-28; the
+clone-only XLN Online Installer plus Bitwig with the same `--address`
+resolved **WRONG COMPUTER ID** on 2026-08-29 ~02:00. Pasta is still
+NAT vs Firejail macvlan; that leftover difference was not a blocker
+for this isolated run.
 
 **Writable project paths:** `--writable-path DIR` is repeatable and strict.
 `DIR` must be an existing directory given as a canonical absolute path: no
@@ -252,9 +371,18 @@ relative paths, no symlinks, no `.`/`..` components, no `:` or newlines, and no
 option-looking values. It is rejected when it equals, contains, or sits inside
 the production prefix, a production plugin root, a system root, the project
 tree, the clone or the isolation tree — under either its own name or the
-canonical name of a symlinked plugin root. Outside those writable mounts the DAW
-either fails to write or writes into the private tmpfs that disappears with the
-run, so save projects and renders into a path you approved.
+canonical name of a symlinked plugin root. The DAW's `HOME` is your real
+login home, so `$HOME/.BitwigStudio` and Wine known folders are already
+visible. You can still name a project directory with `--writable-path` if
+it lives outside that home. The production Wine prefix is not auto-bound
+writable. The real home **is writable** — that is the point (license,
+settings, XLN content) and also the caveat. Isolated plugins that follow
+Wine user-folder redirects then write into those real host directories.
+Writes to the prefix land on `prefix-copy/`, not the production prefix.
+Outside those writable mounts the DAW either fails to write or writes
+into the private tmpfs that disappears with the run, so save projects and
+renders into a path you approved. Isolated Bitwig will write settings and
+license state back to the real `~/.BitwigStudio`.
 
 **Native plugin directories:** `--native-plugin-path DIR` is repeatable and
 held to the same standard, for two reasons at once. The directory is bound
@@ -285,6 +413,7 @@ nothing. Every one of these refusals happens before the prefix is cloned.
 | `Error: '<daw>' was not found in PATH as an executable file` | the DAW is resolved before any mount is planned |
 | `Error: the DAW install root would expose the real home (...)` | the DAW binary sits directly in `$HOME`. Move it into its own directory — binding all of `$HOME` read-only is the shortcut this launcher refuses |
 | `Error: the production plugin root ... is a symlink that does not resolve` | a dangling `~/.vst`-style symlink. The launcher will not run when it cannot see the bridges it is meant to protect; repair or remove the link |
+| `Error: pasta and slirp4netns were not found in PATH` | `--mac` needs pasta (Arch: `pacman -S passt`) or slirp4netns. The launcher will not drop `--mac` and will not use Firejail+nsenter |
 
 All of these happen *before* the prefix is cloned, before `yabridgectl` runs
 and before the DAW starts.
@@ -350,8 +479,10 @@ they resolve to. `setup.sh` does the same for its own location, so `env.sh` and
 Every value is re-derived at write time rather than copied from what an earlier
 phase believed:
 
-- the source device and inode come from the clone's own provenance record, and
-  the recorded path must still be that exact filesystem object;
+- the source inode and canonical path come from the clone's own provenance
+  record and must still name that filesystem object. A remount that only
+  changes the kernel device number is the same source; the recorded device is
+  refreshed and published as the current `st_dev`;
 - the clone must still be the directory that was validated earlier in the run —
   a clone swapped after validation is refused;
 - the Wine executable is asked for its version again, and it must match the
@@ -457,13 +588,13 @@ isolated `prefix/` which has no plugins installed. Use `daw-env.sh` instead
 
 ### yabridge-host.exe chain
 
-When using `./daw-env.sh reaper` (WINEPREFIX → `prefix-copy/`):
+When using `./daw-env.sh reaper` (clone overlaid at the production prefix path):
 ```
-generated .so in isolation/home/.vst/yabridge/ (on VST_PATH)
+generated .so at ~/.vst/yabridge (isolated tree overlaid on the host path)
   → finds yabridge-host.exe on PATH (our build/yabridge/ is first)
   → yabridge-host.exe wrapper reads $WINELOADER (our build/wine/bin/wine)
   → runs yabridge-host.exe.so with wine 11.8
-  → loads Windows plugin DLL, prefix forced to prefix-copy/ via $WINEPREFIX
+  → loads Windows plugin DLL; WINEPREFIX is the production path, clone overlaid
 ```
 
 When using `./test.sh info` (WINEPREFIX → `prefix/`):
@@ -476,7 +607,8 @@ yabridge .so
 ```
 
 No system wine binary is involved in either case. With `./daw-env.sh`, the
-production prefix is mounted read-only and writes go to the clone.
+production prefix stays read-only on the host; writes go to `prefix-copy/`
+and to the real login home (`~/.BitwigStudio`, `~/Documents`, …).
 
 ## Test harness integration
 
@@ -579,8 +711,13 @@ Flags: `--fresh` (re-clone), `--clean` (delete clone), `--prefix DIR` (clone a
 different prefix), `--native-plugin-path DIR` (expose a native plugin
 directory read-only, repeatable), `--writable-path DIR` (make one directory
 writable inside the sandbox, repeatable), `--network` (give the DAW host
-networking instead of an empty network namespace), `--quiet-wine` (set
-`WINEDEBUG=-all` for the DAW instead of leaving diagnostics alone).
+networking instead of an empty network namespace), `--mac MAC` / `--nic NAME`
+(unshare user+net, pasta `--mac-addr` started from the host and attached
+to that netns, or slirp4netns, then real bwrap inside it; `--nic` is the
+pasta host template; Wine sees `eth0`; `--address` pins pasta guest IPv4;
+implies shared networking; `xln-fj` as the first argument is unwrapped
+into the same identity), `--quiet-wine` (set `WINEDEBUG=-all` for the DAW
+instead of leaving diagnostics alone).
 
 `bwrap` and the namespaces it needs are checked before the prefix is cloned
 and before any bridge is generated, so an unusable sandbox costs you nothing
@@ -638,8 +775,9 @@ home (`/opt` is already read-only in full) rather than loosening the boundary.
 
 ### The DAW cannot save a project
 
-Only `prefix-copy/`, `isolation/` and each `--writable-path DIR` are writable.
-Pass the project directory explicitly:
+Only `prefix-copy/`, `isolation/`, your real login home, and each
+`--writable-path DIR` are writable. Pass a project directory outside
+`$HOME` explicitly:
 
 ```bash
 ./daw-env.sh --writable-path "$(realpath ~/Music/projects)" reaper
@@ -647,7 +785,20 @@ Pass the project directory explicitly:
 
 The path must be canonical (`realpath` output), must exist, and must not
 overlap the production prefix, the production plugin roots, a system root, or
-this project tree.
+this project tree. Paths under your login home are already visible because
+that home is `HOME`.
+
+### Bitwig asks to accept the license or log in again
+
+The DAW's `HOME` is your real login home. Bitwig stores its license, login
+and settings in `~/.BitwigStudio` and must log that host path — not
+`isolation/home/.BitwigStudio` and not `/root/.BitwigStudio`. `--mac` keeps
+your login uid so Java `user.home` matches. Isolated XDG is only for
+yabridgectl. Wine plugins resolve `SHGetKnownFolderPath` through
+`C:\users\<name>\Documents` into `~/Documents` on that same real home.
+You do not need an extra `--writable-path` for `.BitwigStudio` or
+`Documents`. The production Wine prefix stays read-only on the host; prefix
+writes land on `prefix-copy/`.
 
 ### The DAW has no sound or no window
 
@@ -692,6 +843,44 @@ actually used.
 
 The sandbox has no network by default. Run the activation once with
 `./daw-env.sh --network <daw>`.
+
+### Wine prints winebrowser / urlmon.dll.CreateUri / native iertutil errors
+
+Harmless leftover from the cloned production prefix. Wine 11.8 still has
+native `iertutil` and related URL helpers registered; plugins or the XLN
+installer may poke `winebrowser`. Close the dialogs. This is not an
+isolation bug and does not mean the production prefix was written.
+
+### XLN Online Installer / AD2 "machine id wrong"
+
+The full procedure, every dialog we hit, and why **two restarts** are
+success: [Isolated XLN Online Installer](./docs/xln-isolated-installer.md).
+
+Short version: run the **updateBinary** path through daw-env (same
+`--mac` / `--nic` / `--address` as Bitwig). daw-env pins `cacert.pem`,
+syncs clone Program Files to 4.7.3, prefers that exe, and waits on
+`wineserver` so Cotton's self-replace can come back. Do not `--fresh`.
+Do not click Ignore. Production prefix stays read-only.
+
+AD2 **WRONG COMPUTER ID** is the Wine Computer ID (MAC / NIC), not
+`/etc/machine-id`. Pasta `--mac` is NAT + `eth0` + pinned IPv4, not
+Firejail macvlan. Verified 2026-08-29 ~02:00: AD2 authorized in Bitwig
+on the same clone and pasta identity after clone-only installer
+authorize. Do not `--fresh`. If it returns, relaunch Bitwig with the
+same `--mac` / `--nic` / `--address`.
+
+```bash
+./daw-env.sh --mac "$XLN_MAC" --nic "$XLN_NIC" --address "$XLN_ADDR" \
+  --writable-path "$(realpath -- "$BITWIG_PROJECTS")" \
+  "$PWD/build/wine/bin/wine" \
+  "C:\\ProgramData\\XLN Audio\\Temp\\App\\Cotton XLN Online Installer\\updateBinary\\XLN Online Installer.exe"
+```
+
+### XLN installer window flashes and dies (`X_ShmPutImage`)
+
+Wine on a Wayland session still uses XWayland. MIT-SHM (`X_ShmPutImage`
+BadValue) needs the host IPC namespace and host `/dev/shm`. The sandbox
+shares those (no `--unshare-ipc`). Retry the installer through daw-env.
 
 ### Wayland + xdotool
 

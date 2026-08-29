@@ -147,11 +147,16 @@ validate_clone_provenance() {
         return 1
     fi
     read -r expected_device expected_inode <<< "$identity"
+    # Path + inode name the source tree. st_dev is stored for the run
+    # manifest, but it moves across remounts and btrfs anonymous devices;
+    # treating that as a different prefix strands a good clone.
     if [[ "${fields[0]}" != "$source" ||
-          "${fields[1]}" != "$expected_device" ||
           "${fields[2]}" != "$expected_inode" ]]; then
         report_provenance_mismatch "$clone" "$source"
         return 1
+    fi
+    if [[ "${fields[1]}" != "$expected_device" ]]; then
+        write_clone_provenance "$clone" "$source" "$identity" || return 1
     fi
 
     VALIDATED_CLONE_IDENTITY="$(clone_path_identity "$clone")"

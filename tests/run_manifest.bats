@@ -208,7 +208,7 @@ configure_manifest() {
 stage_manifest_command() {
   MANIFEST_COMMAND=(
     "$MANIFEST_BWRAP"
-    --unshare-pid --unshare-ipc --unshare-uts --unshare-cgroup-try
+    --unshare-pid --unshare-uts --unshare-cgroup-try
     --unshare-user --unshare-net --die-with-parent --new-session
     --ro-bind /usr /usr
     --bind "$MANIFEST_CLONE" "$MANIFEST_CLONE"
@@ -733,6 +733,36 @@ manifest.json" MANIFEST_COMMAND
   MANIFEST_COMMAND=(
     "$MANIFEST_BWRAP" --unshare-user --unshare-net -- "$MANIFEST_WINE"
   )
+  write_manifest
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"DAW"* ]]
+  [ ! -e "$MANIFEST_DESTINATION" ]
+}
+
+@test "run manifest accepts wine-wait.sh wrapping the recorded DAW" {
+  load_run_manifest
+  stage_manifest_inputs "$MANIFEST_TREE"
+  local wait="$MANIFEST_TREE/lib/wine-wait.sh"
+  mkdir -p "$MANIFEST_TREE/lib"
+  printf '%s\n' '#!/bin/bash' 'exit 0' > "$wait"
+  MANIFEST_COMMAND=(
+    "$MANIFEST_BWRAP" --unshare-user --unshare-net -- "$wait" "$MANIFEST_DAW"
+  )
+
+  write_manifest
+  [ "$status" -eq 0 ]
+  [ "$(manifest_text daw_executable)" = "$MANIFEST_DAW" ]
+}
+
+@test "run manifest refuses a wrapper that is not lib/wine-wait.sh" {
+  load_run_manifest
+  stage_manifest_inputs "$MANIFEST_TREE"
+  local wait="$MANIFEST_TREE/not-wine-wait.sh"
+  printf '%s\n' '#!/bin/bash' 'exit 0' > "$wait"
+  MANIFEST_COMMAND=(
+    "$MANIFEST_BWRAP" --unshare-user --unshare-net -- "$wait" "$MANIFEST_DAW"
+  )
+
   write_manifest
   [ "$status" -ne 0 ]
   [[ "$output" == *"DAW"* ]]
@@ -1333,7 +1363,7 @@ EOF
   recorded="$(launched_argv)"
   [[ "$recorded" == *" --unshare-net "* ]]
   [[ "$recorded" != *"--bind $(printf '%q' "$elsewhere")"* ]]
-  [[ "$recorded" == *"--setenv HOME $(printf '%q' "$ISOLATED_HOME")"* ]]
+  [[ "$recorded" == *"--setenv HOME $(printf '%q' "$PRODUCTION_HOME")"* ]]
   [ "$(daw_env_value WINEDEBUG)" = "<unset>" ]
 }
 
