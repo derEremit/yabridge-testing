@@ -9,7 +9,7 @@ This is the procedure that, on **2026-08-29 ~01:54**, reached
 restarts** inside one sandbox. Do not start the next session from zero.
 Do not `--fresh` or `rm -rf prefix-copy`.
 
-See also: [README — Launch a DAW against a COW clone](../README.md#launch-a-daw-against-a-cow-clone-of-your-real-prefix).
+See also: [DAW sandbox reference — command forms](daw-sandbox.md#command-forms).
 
 ## Outcome (2026-08-29)
 
@@ -18,7 +18,7 @@ See also: [README — Launch a DAW against a COW clone](../README.md#launch-a-da
 | Account | the operator XLN account (`XLN_ACCOUNT` in `run-state/identity.env`) (logged in inside the installer) |
 | Installer | Cotton **4.7.3** (`4_7_3 Release1 2026-08-18 - 14-26-25`) |
 | BinaryLocation | `C:\Program Files\XLN Audio\XLN Online Installer\` |
-| ComputerId | `7ea3094c9b32` (legacy `863517d1f987`) — not the raw MAC |
+| ComputerId | derived value, not the raw MAC (recorded in gitignored `run-state/`) |
 | Host Wine | `wine-11.16 (Staging)` from `build/wine/` |
 | Prefix | clone `prefix-copy/` overlaid on `~/.audio-production/winplugins` |
 | Network | pasta `--mac "$XLN_MAC" --nic "$XLN_NIC" --address "$XLN_ADDR"` |

@@ -19,7 +19,7 @@ load test_helper
 }
 
 @test "README clones staging without a submodule" {
-  grep -q 'github.com/derEremit/yabridge-staging' "$PROJECT_ROOT/README.md"
+  grep -q 'github.com/derEremit/yabridge-testing' "$PROJECT_ROOT/README.md"
   refute grep -q 'recurse-submodules' "$PROJECT_ROOT/README.md"
   refute grep -q 'yabridge-test-infra/web' "$PROJECT_ROOT/README.md"
 }
