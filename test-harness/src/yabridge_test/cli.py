@@ -67,7 +67,10 @@ def _print_draft_response(response: SubmitResponse) -> bool:
     if completion_url:
         console.print()
         console.print("[bold cyan]Edit your report at:[/bold cyan]")
-        console.print(f"  [link={completion_url}]{completion_url}[/link]")
+        # Plain print: rich wraps long lines to the terminal width, and a
+        # secret URL broken across lines gets copied truncated — an invalid
+        # token that reads as "link no longer usable".
+        print(f"  {completion_url}")
         console.print()
         console.print(
             "[dim]The report stays private until you publish it on that page.[/dim]"
