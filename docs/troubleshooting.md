@@ -13,6 +13,33 @@ source env.sh && yabridge-wine winecfg
 
 Close winecfg when done. The prefix is now ready.
 
+## "This application could not be started" dialogs while the clone upgrades
+
+Wine's one-time upgrade of the cloned prefix (first launch after `--fresh` or
+a Wine change) can show one or more modal dialogs titled `rundll32.exe` with
+"This application could not be started. Do you want to view information about
+this issue?" — sometimes interleaved with the DAW or installer you launched.
+
+This is Wine's mscoree missing-.NET message, not a failure of the launcher:
+the Kron4ek archives ship no Wine Gecko/Mono add-ons, and a prefix created by
+an older Wine still references the add-on versions that Wine registered back
+then. Click **No** on each dialog; the upgrade continues and finishes.
+
+`setup.sh` now links the system wine packages' add-ons
+(`/usr/share/wine/{gecko,mono}`) into `build/wine/share/wine/` so the upgrade
+can register the versions the new Wine expects. For a `build/` created before
+that change, add the links yourself and re-clone:
+
+```bash
+ln -sfn /usr/share/wine/gecko build/wine/share/wine/gecko
+ln -sfn /usr/share/wine/mono  build/wine/share/wine/mono
+```
+
+The dialogs are one-time per clone either way. If a plugin later needs a
+webview or .NET and misbehaves, verify the linked versions match what the
+build expects: `WINEDEBUG=+mscoree wineboot --init` on a scratch prefix
+prints where the runtime was found.
+
 ## Build fails
 
 - You need `winegcc` (from system `wine` package) — this is the cross-compiler

@@ -293,6 +293,7 @@ DEPS=(
     base-devel meson ninja
     wine wine-staging      # provides winegcc for cross-compiling host exe
     libxcb lib32-libxcb    # X11 client library
+    passt                  # pasta: daw-env.sh --mac fails closed without it
 )
 
 if command -v pacman &>/dev/null; then
@@ -446,12 +447,24 @@ PY
         assert_locked_build_identity
         mv -f "$WINE_CANDIDATE_ARCHIVE" "$TARBALL"
         if [[ -e "$WINE_DIR" ]]; then
+            # Swapping a live build/wine is only offered atomically.
+            if ! mv --help 2>/dev/null | grep -Fq -- '--exchange'; then
+                err "GNU coreutils mv with --exchange support is required to replace $WINE_DIR"
+                err "Update coreutils (>= 9.4), or move $WINE_DIR aside and rerun setup."
+                exit 1
+            fi
             if ! mv --exchange --no-copy -T "$EXTRACTED_DIR" "$WINE_DIR"; then
                 err "Could not atomically activate Wine candidate"
                 exit 1
             fi
         else
-            if ! mv --no-copy -T "$EXTRACTED_DIR" "$WINE_DIR"; then
+            # The candidate lives inside $BUILD, so this is a same-filesystem
+            # rename either way; --no-copy (coreutils >= 9.2) only adds a
+            # guard against silent cross-device copies and older coreutils
+            # (Debian 12, Ubuntu 22.04) may not have it.
+            MV_NO_COPY=(--no-copy)
+            mv --help 2>/dev/null | grep -Fq -- '--no-copy' || MV_NO_COPY=()
+            if ! mv ${MV_NO_COPY[@]+"${MV_NO_COPY[@]}"} -T "$EXTRACTED_DIR" "$WINE_DIR"; then
                 err "Could not activate Wine candidate"
                 exit 1
             fi
@@ -473,6 +486,25 @@ PY
 
     # Verify
     info "Wine version: $("$WINE_DIR/bin/wine" --version 2>/dev/null || echo 'check failed')"
+
+    # Kron4ek archives ship no Wine Gecko/Mono add-ons. Without them, the
+    # one-time upgrade of a real prefix throws modal mscoree "This application
+    # could not be started" dialogs from inside the sandbox. The distro's wine
+    # packages already carry copies the operator trusts via their package
+    # manager, so expose those to the isolated build instead of downloading
+    # anything. A version the build does not expect is simply ignored.
+    for addon in gecko mono; do
+        [[ -d "$WINE_DIR/share/wine" && ! -e "$WINE_DIR/share/wine/$addon" ]] || continue
+        for candidate in /usr/share/wine /usr/local/share/wine; do
+            if [[ -d "$candidate/$addon" ]]; then
+                ln -sfn "$candidate/$addon" "$WINE_DIR/share/wine/$addon"
+                info "Linked system Wine $addon from $candidate/$addon"
+                continue 2
+            fi
+        done
+        info "No system Wine $addon found; prefix upgrades may show" \
+             "'application could not be started' dialogs (safe to dismiss)"
+    done
 fi
 
 # ── Yabridge build ───────────────────────────────────────────────────────────
@@ -575,6 +607,31 @@ python3 -m venv "$HARNESS_VENV"
 ok "Test harness installed"
 
 # ── Generate env.sh ──────────────────────────────────────────────────────────
+# Scaffold the pinned network identity daw-env.sh --mac and the XLN docs
+# reference. Detected from the default route so the values are real for this
+# host; the operator pins them the moment a vendor authorizes against them.
+# Never overwritten: an existing file may already carry an authorized identity.
+if [[ ! -e run-state/identity.env ]]; then
+    ID_NIC="$(ip -o route show default 2>/dev/null |
+        awk '{for(i=1;i<NF;i++) if($i=="dev"){print $(i+1); exit}}')"
+    if [[ -n "$ID_NIC" && -r "/sys/class/net/$ID_NIC/address" ]]; then
+        ID_MAC="$(cat "/sys/class/net/$ID_NIC/address")"
+        ID_ADDR="$(ip -o -4 addr show dev "$ID_NIC" 2>/dev/null |
+            awk 'NR==1{sub(/\/.*/,"",$4); print $4}')"
+        mkdir -p run-state
+        cat > run-state/identity.env <<IDENTITY
+# Pinned network identity for daw-env.sh --mac / --nic / --address (vendor
+# license checks such as the XLN Computer ID). Detected from this host's
+# default route by setup.sh. Once a vendor authorizes this identity, keep
+# these values stable forever and never regenerate this file.
+XLN_MAC=$ID_MAC
+XLN_NIC=$ID_NIC
+XLN_ADDR=$ID_ADDR
+IDENTITY
+        info "Wrote identity template run-state/identity.env ($ID_NIC $ID_MAC)"
+    fi
+fi
+
 info "Generating $ENV_FILE..."
 cat > "$ENV_FILE" << ENVEOF
 # Yabridge + Wine-Staging isolated test environment

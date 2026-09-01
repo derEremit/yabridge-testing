@@ -154,6 +154,7 @@ dialog or log line. Do not click Ignore.
 | Window flashes, `X_ShmPutImage` BadValue | Private IPC/`/dev/shm` vs XWayland MIT-SHM | Share host IPC + bind host `/dev/shm` |
 | Cannot download / bad DNS | pasta inherited Tailscale `100.100.100.100` | pasta `--dns 1.1.1.1 --dns 192.168.1.1 --dhcp-dns` |
 | Firejail `--mac` dropped / `fbwrap` / `nsenter` EPERM | Must not nest Firejail and bwrap | pasta netns we own; unwrap `xln-fj` into `--mac`/`--nic` |
+| Fail-fast `c0000409` ~20 s in, before any click; Cotton log `setFloat(Cotton_Stats_messageReceived_CallFreq_Avg) can't set parameter to inf` | Cross-core timestamp skew (seen on RT kernels; also `mDNSPlatformRawTime went backwards` lines) makes Cotton's stats math hit a zero/negative time delta | Pin the installer launch to one core: `taskset -c <core> ./daw-env.sh --mac … wine …`. DAW sessions do not need pinning (2026-08-31, reproduced 2/2, fixed 2/2) |
 
 Clone identity: `lib/clone-state.sh` accepts the same path+inode if
 `st_dev` changes (btrfs remount). Do not treat that as a reason to

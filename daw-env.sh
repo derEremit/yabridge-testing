@@ -122,7 +122,7 @@
 #                              pasta and slirp4netns are both missing
 #                              (install passt).
 #   --nic NAME                 host template for pasta --interface (default:
-#                              eno1, or $XLN_NIC). Wine still sees one NIC
+#                              the default-route interface, or $XLN_NIC). Wine still sees one NIC
 #                              named eth0 (Firejail / xln-fj). --mac is the
 #                              Computer ID. If the first argument is xln-fj,
 #                              it is unwrapped and this identity is applied

@@ -23,6 +23,16 @@ sudo pacman -S python-virtualenv
 ### Ubuntu / Debian
 
 ```bash
+# Build dependencies for setup.sh (yabridge + probe). setup.sh only
+# auto-installs on pacman distros; install these yourself first.
+sudo apt install build-essential meson ninja-build wine wine64-tools \
+    libxcb1-dev mingw-w64
+# 32-bit chainloaders additionally need the i386 dev packages:
+#   sudo dpkg --add-architecture i386 && sudo apt update
+#   sudo apt install gcc-multilib libxcb1-dev:i386
+# daw-env.sh --mac needs user-mode networking:
+sudo apt install passt
+
 # Core dependencies for test harness
 sudo apt install python3 python3-pip python3-venv xdotool x11-xserver-utils wmctrl
 
@@ -32,6 +42,12 @@ sudo apt install packer qemu-kvm libvirt-daemon-system virt-manager ovmf
 # For Ansible provisioning
 sudo apt install ansible
 ```
+
+First-time `setup.sh` works with any coreutils. Replacing an existing
+`build/wine` in place (moving to another Wine version) and `daw-env.sh`'s
+`--fresh`/bridge refresh need `mv --exchange` from coreutils >= 9.4
+(Ubuntu 24.04+, Debian 13+); on older releases move `build/wine` aside
+and rerun instead.
 
 ### Fedora
 

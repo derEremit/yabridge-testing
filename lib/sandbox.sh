@@ -81,10 +81,17 @@ SANDBOX_MAC_NETNS_EXEC=""
 # Leftover pasta/slirp pid if a helper is interrupted; never inherited.
 SANDBOX_MAC_HOLDER_PID=""
 
-# Matches ~/.local/bin/xln-fj defaults. Tests override the sysfs root so a
-# missing host NIC cannot make command-construction fail on another machine.
+# Tests override the sysfs root so a missing host NIC cannot make
+# command-construction fail on another machine. The NIC default follows the
+# host's default route (pasta needs a template interface that actually
+# routes); "eno1" is only the last resort when no default route exists.
 SANDBOX_DEFAULT_MAC="02:00:5e:00:53:01"
-SANDBOX_DEFAULT_NIC="eno1"
+if [[ -z "${SANDBOX_DEFAULT_NIC:-}" ]] &&
+    command -v ip >/dev/null 2>&1 && command -v awk >/dev/null 2>&1; then
+    SANDBOX_DEFAULT_NIC="$(ip -o route show default 2>/dev/null |
+        awk '{for(i=1;i<NF;i++) if($i=="dev"){print $(i+1); exit}}' || true)"
+fi
+SANDBOX_DEFAULT_NIC="${SANDBOX_DEFAULT_NIC:-eno1}"
 SANDBOX_NIC_SYSFS="${SANDBOX_NIC_SYSFS:-/sys/class/net}"
 
 # Host layout. This is configuration rather than user input; fixtures override

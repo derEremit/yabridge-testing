@@ -1548,6 +1548,9 @@ setup_mac_identity_fixtures() {
   NIC_SYSFS="$BATS_TEST_TMPDIR/sys-class-net"
   mkdir -p "$NIC_SYSFS/eno1" "$NIC_SYSFS/lo"
   export SANDBOX_NIC_SYSFS="$NIC_SYSFS"
+  # The launcher derives the NIC default from the host's default route; pin
+  # it so fixtures do not depend on the machine running the tests.
+  export SANDBOX_DEFAULT_NIC="eno1"
   UNSHARE_CALLS="$BATS_TEST_TMPDIR/unshare.calls"
   : > "$UNSHARE_CALLS"
   export SANDBOX_TEST_UNSHARE_CALLS="$UNSHARE_CALLS"
