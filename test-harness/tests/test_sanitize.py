@@ -172,3 +172,56 @@ def test_submitter_posts_sanitized_json(monkeypatch: pytest.MonkeyPatch) -> None
     assert HOME not in str(body)
     assert "/home/" not in str(body)
     assert "/api/v1/results" not in str(captured["url"])
+
+
+def test_oversized_measurements_are_trimmed_to_the_server_budget() -> None:
+    from yabridge_test.sanitize import _measurement_nodes
+
+    # Mirror the real failure shapes: raw_events is a dict of per-cycle
+    # lists, samples is a single-entry list holding one huge dict.
+    events = [{"seq": i, "type": "mouse", "x": i, "y": i} for i in range(200)]
+    raw_events = {"cycle_1": list(events), "cycle_2": list(events)}
+    samples = [{"cycle": 1, "events": list(events), "xtest": {"press": True}}]
+    report = _report(
+        tests=[
+            SingleTestResult(
+                name="probe_nested",
+                result=schemas.TestResult.FAIL,
+                details="missing_plugin_input_evidence",
+                measurements={
+                    "classification": "missing_plugin_input_evidence",
+                    "x11_origin": [375, 322],
+                    "assertions": [
+                        {"name": "plugin_input_delivery", "result": "fail"}
+                    ],
+                    "raw_events": raw_events,
+                    "samples": samples,
+                },
+            )
+        ]
+    )
+
+    payload = payload_for_submit(report)
+    measurements = payload["tests"][0]["measurements"]
+
+    assert _measurement_nodes(measurements) <= 2048
+    # Scalars and assertions survive untouched; only bulky lists shrink,
+    # keeping the oldest entries and recording what was cut.
+    assert measurements["classification"] == "missing_plugin_input_evidence"
+    assert measurements["x11_origin"] == [375, 322]
+    assert measurements["assertions"] == [
+        {"name": "plugin_input_delivery", "result": "fail"}
+    ]
+    # Oldest entries survive, wherever the bulk lived in the tree.
+    assert measurements["raw_events"]["cycle_1"][0]["seq"] == 0
+    dropped = measurements.get("raw_events_dropped", 0) + measurements.get(
+        "samples_dropped", 0
+    )
+    assert dropped > 0
+
+
+def test_measurements_within_budget_are_untouched() -> None:
+    payload = payload_for_submit(_report())
+    measurements = payload["tests"][0]["measurements"]
+    assert "classification" in measurements
+    assert not any(key.endswith("_dropped") for key in measurements)

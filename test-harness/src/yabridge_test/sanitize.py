@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import os
 import re
 from pathlib import Path
@@ -23,6 +24,92 @@ COMPUTER_ID = re.compile(r"\bComputerId\s*[=:]\s*\S+", re.IGNORECASE)
 _MEASUREMENT_LOG_KEYS = frozenset(
     {"yabridge_log_tail", "yabridge_editor_log_tail"}
 )
+
+# Server contract: drafts reject a test whose measurements exceed this many
+# JSON nodes (MAX_MEASUREMENT_NODES on the results server). A failing probe
+# accumulates retries in its evidence lists and can exceed it several times
+# over, which used to make exactly the interesting reports unsubmittable.
+_MEASUREMENT_NODE_BUDGET = 2048
+
+
+def _measurement_nodes(value: Any) -> int:
+    if isinstance(value, dict):
+        return 1 + sum(_measurement_nodes(item) for item in value.values())
+    if isinstance(value, list):
+        return 1 + sum(_measurement_nodes(item) for item in value)
+    return 1
+
+
+# Lists at or below this node count are evidence, not bulk (coordinate
+# pairs, assertion lists); the trim never touches them.
+_MEASUREMENT_TRIM_FLOOR = 16
+
+
+def _bulkiest_list_path(value: Any) -> tuple[Any, ...] | None:
+    """Path of the largest multi-entry list anywhere in the tree, if any
+    exceeds the trim floor."""
+    best_path: tuple[Any, ...] | None = None
+    best_nodes = _MEASUREMENT_TRIM_FLOOR
+
+    def walk(item: Any, path: tuple[Any, ...]) -> None:
+        nonlocal best_path, best_nodes
+        if isinstance(item, dict):
+            for key, child in item.items():
+                walk(child, path + (key,))
+        elif isinstance(item, list):
+            count = _measurement_nodes(item)
+            if len(item) > 1 and count > best_nodes:
+                best_path, best_nodes = path, count
+            for index, child in enumerate(item):
+                walk(child, path + (index,))
+
+    walk(value, ())
+    return best_path
+
+
+def _trim_measurements_to_budget(
+    measurements: dict[str, Any], budget: int = _MEASUREMENT_NODE_BUDGET
+) -> dict[str, Any]:
+    """Fit measurements into the server's node budget.
+
+    Repeatedly halves the bulkiest event list anywhere in the tree (keeping
+    the oldest entries, which hold the baseline and the first failure) and
+    records what was cut in a top-level ``<key>_dropped`` counter. Small
+    lists — coordinates, assertions — are never touched. If halving cannot
+    reach the budget, the bulkiest top-level container is dropped whole and
+    replaced by a ``<key>_dropped_nodes`` marker.
+    """
+    if _measurement_nodes(measurements) <= budget:
+        return measurements
+
+    trimmed = copy.deepcopy(measurements)
+    while _measurement_nodes(trimmed) > budget:
+        path = _bulkiest_list_path(trimmed)
+        if path is not None:
+            parent: Any = trimmed
+            for step in path[:-1]:
+                parent = parent[step]
+            entries = parent[path[-1]]
+            keep = max(1, len(entries) // 2)
+            counter = f"{path[0]}_dropped"
+            trimmed[counter] = trimmed.get(counter, 0) + len(entries) - keep
+            parent[path[-1]] = entries[:keep]
+            continue
+        bulkiest = max(
+            (
+                key
+                for key, value in trimmed.items()
+                if isinstance(value, (dict, list))
+            ),
+            key=lambda key: _measurement_nodes(trimmed[key]),
+            default=None,
+        )
+        if bulkiest is None:
+            break
+        trimmed[f"{bulkiest}_dropped_nodes"] = _measurement_nodes(
+            trimmed.pop(bulkiest)
+        )
+    return trimmed
 
 
 def classify_wine_prefix_kind(
@@ -104,6 +191,8 @@ def _sanitize_measurements(measurements: dict[str, Any] | None) -> dict[str, Any
                 cleaned[key] = _redact_value(identity)
             continue
         cleaned[key] = _redact_value(value)
+    if cleaned:
+        cleaned = _trim_measurements_to_budget(cleaned)
     return cleaned or None
 
 
