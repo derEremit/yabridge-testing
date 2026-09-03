@@ -242,6 +242,12 @@ Interpretation tips:
 | FAIL + `issue_409_local_as_global` | Classic window-position offset pattern; compare delta to origin |
 | FAIL + `missing_plugin_input_evidence` | Completed run, but WM_MOUSEMOVE/LBUTTONDOWN/LBUTTONUP not all observed |
 
+On the results site's completion page an automated (`probe`/`suite`/`plugin`)
+report leads with these findings and pre-ticks the matching issue box:
+`issue_409_local_as_global` → "Mouse coordinates offset",
+`missing_plugin_input_evidence` → "Input never reaches the plugin". The
+DAW-only sections (host, plugins, workarounds) are folded away for such runs.
+
 ## Development markers and CI
 
 Pytest markers partition ownership:
